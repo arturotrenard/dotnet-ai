@@ -1,0 +1,114 @@
+name: fork-ci
+
+# CI for the arturotrenard/dotnet-ai fork. Upstream's build.yml targets RunsOn
+# runners that only exist in the diagridio org, so on this fork its jobs queue
+# forever; build.yml is disabled in this repo's Actions settings instead of
+# being edited, which keeps master byte-identical to upstream for syncing.
+# This workflow uses GitHub-hosted runners and, unlike build.yml, really runs
+# every test project on every target framework.
+
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+    branches:
+      - dev
+  workflow_dispatch:
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Never runs upstream if this file is ever merged there.
+    if: github.repository_owner != 'diagridio'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # MinVer derives the version from tags; a shallow clone yields 0.0.0-*.
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+      - name: Restore
+        run: dotnet restore
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+      - name: Pack
+        run: dotnet pack --configuration Release --no-build
+      - name: Upload packages
+        uses: actions/upload-artifact@v6
+        with:
+          name: packages
+          path: bin/Release/nugets
+
+  discover:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      unit: ${{ steps.find.outputs.unit }}
+      integration: ${{ steps.find.outputs.integration }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: find
+        run: |
+          echo "unit=$(find test -name 'Diagrid.*.Test.csproj' | jq -R -s -c 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
+          echo "integration=$(find test -name 'Diagrid.*.IntegrationTest.csproj' | jq -R -s -c 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
+
+  unit-tests:
+    name: Unit ${{ matrix.framework }} - ${{ matrix.project }}
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.discover.outputs.unit) }}
+        framework: [net8.0, net9.0, net10.0]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+      - name: Test
+        run: dotnet test "${{ matrix.project }}" --configuration Release --framework ${{ matrix.framework }}
+        timeout-minutes: 30
+
+  integration-tests:
+    name: Integration ${{ matrix.framework }} - ${{ matrix.project }}
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJson(needs.discover.outputs.integration) }}
+        framework: [net8.0, net9.0, net10.0]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+      # OutputType=Exe with UseAppHost=true needs an explicit RuntimeIdentifier
+      # for the apphost to exist before the tests run. Docker is preinstalled.
+      - name: Test
+        run: |
+          dotnet test "${{ matrix.project }}" \
+            --configuration Release \
+            --framework ${{ matrix.framework }} \
+            /p:RuntimeIdentifier=linux-x64
+        timeout-minutes: 45
