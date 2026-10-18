@@ -20,10 +20,12 @@ conflicts with AGENTS.md's git and CI notes, this section wins:
   in with `git merge upstream/master` on `dev`.
 - **CI here is `.github/workflows/fork-ci.yml`**, on GitHub-hosted `ubuntu-latest`, triggered by
   pushes and PRs to `dev`. It runs every test project on all three frameworks, so unlike
-  upstream it does cover `net8.0`/`net9.0`. Upstream's `build.yml` is **disabled in the fork's
-  Actions settings** (its RunsOn runners do not exist here) rather than edited, so that
-  `master` stays identical to upstream. Do not re-enable it, and do not push tags to the fork
-  expecting a NuGet publish.
+  upstream it does cover `net8.0`/`net9.0`. Upstream's `build.yml` must be **disabled in the
+  fork's Actions settings** (its RunsOn runners do not exist here) rather than edited, so that
+  `master` stays identical to upstream. GitHub only registers a fork's workflow once something
+  triggers it, so check `gh api repos/arturotrenard/dotnet-ai/actions/workflows --jq '.workflows[] | "\(.path) \(.state)"'`;
+  if `build.yml` shows `active`, run `gh workflow disable build.yml -R arturotrenard/dotnet-ai`
+  and cancel its queued run. Do not push tags to the fork expecting a NuGet publish.
 - Changes meant for upstream go from a branch off `upstream/master`, not from `dev`, so they do
   not carry `fork-ci.yml` or this section.
 
