@@ -4,21 +4,31 @@ Notes for an AI assistant working in this repo: the things that are easy to get
 wrong. The README says what the library is and how to call it; this does not
 repeat it.
 
-Verified 2026-08-23 against `master`, and against `diagrid` CLI **v1.66.0**
+Verified 2026-08-23 against `master` (layout, package and test-command lines
+re-checked 2026-10-18), and against `diagrid` CLI **v1.66.0**
 logged in to production for every CLI claim. Re-check the CLI lines against a
 newer version rather than trusting this file.
 
-## Layout: one shipping project, two test projects, nine examples
+## Layout: two shipping projects, three test projects, ten examples
 
 | Path | What it is |
 |---|---|
-| `src/Diagrid.AI.Microsoft.AgentFramework/` | the only packable project — this *is* the NuGet package |
-| `test/…AgentFramework.Test/` | unit tests |
+| `src/Diagrid.AI.Microsoft.AgentFramework/` | the agent runtime — the main NuGet package |
+| `src/Diagrid.AI.Identity/` | app-side Catalyst identity (JWT verification + outbound token propagation) — a second NuGet package |
+| `test/…AgentFramework.Test/` | unit tests for the runtime |
+| `test/Diagrid.AI.Identity.Test/` | unit tests for Identity |
 | `test/…AgentFramework.IntegrationTest/` | integration tests, `OutputType=Exe`, needs Docker |
-| `examples/*/` | nine ASP.NET Core samples, plus `examples/Components/` (Dapr YAML, not a project) |
+| `examples/*/` | ten ASP.NET Core samples, plus `examples/Components/` (Dapr YAML, not a project) |
+
+- **`Diagrid.AI.Identity` is `[Experimental("DGRDID001")]` for the whole
+  assembly** (`src/Diagrid.AI.Identity/AssemblyInfo.cs`). Every consumer must
+  suppress `DGRDID001` — its test project and `examples/IdentityDemo` do so in
+  their `.csproj`. A new consumer that forgets fails to build under
+  `TreatWarningsAsErrors`. Graduate it by deleting the attribute, not by
+  widening `NoWarn`.
 
 - **One solution, and it is the unit of work.** `Diagrid.AI.Microsoft.AgentFramework.sln`
-  holds all twelve projects; CI runs bare `dotnet restore` / `build` / `pack`
+  holds all fifteen projects; CI runs bare `dotnet restore` / `build` / `pack`
   from the root and lets the solution fan out. There is no `Makefile` and no
   per-project script. Add any new project to the `.sln` in the same commit — the
   `build` job will not see it otherwise, while the test jobs *will* (they
@@ -55,6 +65,7 @@ dotnet restore
 dotnet build --configuration Release --no-restore
 dotnet pack  --configuration Release        # nupkgs land in bin/Release/nugets
 dotnet test test/Diagrid.AI.Microsoft.AgentFramework.Test/Diagrid.AI.Microsoft.AgentFramework.Test.csproj --framework net10.0
+dotnet test test/Diagrid.AI.Identity.Test/Diagrid.AI.Identity.Test.csproj --framework net10.0
 ```
 
 - **Only `build` and `ci-unit-tests-gate` are required checks on `master`.**
@@ -109,15 +120,18 @@ dotnet test test/Diagrid.AI.Microsoft.AgentFramework.Test/Diagrid.AI.Microsoft.A
 
 ## The published package
 
-- The package id is **`Diagrid.AI.Microsoft.AgentFramework`** — one package, and
-  the same string as the assembly, the root namespace, and the `.sln`. Latest on
-  nuget.org is **1.0.10**, targeting `net8.0`/`net9.0`/`net10.0`.
+- There are exactly **two** package ids, each the same string as its assembly
+  and root namespace: **`Diagrid.AI.Microsoft.AgentFramework`** (also the `.sln`
+  name) and **`Diagrid.AI.Identity`**. Both target `net8.0`/`net9.0`/`net10.0`
+  and are versioned together from the same tag. Latest on nuget.org (checked
+  2026-10-18) is **1.2.0** for both; Identity was first published at 1.2.0.
 - **`Diagrid.Agents.Workflow` does not exist** and 404s on nuget.org. It is a
   plausible-looking hallucination that has already been emitted into generated
   projects elsewhere. There is no `Diagrid.Agents.*` family at all; any
-  `Diagrid.*` id other than the one above is wrong.
-- **The root `README.md` is what ships to NuGet** (`properties/diagrid_nuget.props`
-  packs `$(RepoRoot)README.md`), and `src/…/README.md` is a hand-synced duplicate
+  `Diagrid.*` id other than the two above is wrong.
+- **The root `README.md` is what ships to NuGet — for both packages**
+  (`properties/diagrid_nuget.props` packs `$(RepoRoot)README.md` into every
+  `src/` project; Identity's docs are its `## Identity` section), and `src/…/README.md` is a hand-synced duplicate
   — today the two are byte-identical apart from line 3. Edit both, or the
   published package drifts from the repo.
 - **Versions come from git tags via MinVer**, prefix `v`, `rc` as the default
@@ -233,7 +247,8 @@ dapr run --app-id invokerapp --dapr-grpc-port 50001 --dapr-http-port 3500 --reso
   a whitespace-only reformat buries the real change.
 - Guard clauses first, one per argument: `ArgumentNullException.ThrowIfNull` and
   `ArgumentException.ThrowIfNullOrWhiteSpace`.
-- `InternalsVisibleTo` exposes `src/` internals to the unit test project only.
+- `InternalsVisibleTo` exposes each `src/` project's internals to its own unit
+  test project only.
   Test through it rather than widening visibility to `public`.
 - Comments here carry the *reason* — which upstream API is experimental, why a
   reflection hook exists, what a workflow may not do. Update them; do not delete
