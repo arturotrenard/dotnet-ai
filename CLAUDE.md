@@ -24,6 +24,11 @@ conflicts with AGENTS.md's git and CI notes, this section wins:
   Actions settings** (`disabled_manually`; its RunsOn runners do not exist here) rather than
   edited, so that `master` stays identical to upstream. Do not re-enable it, and do not push
   tags to the fork expecting a NuGet publish.
+- **On `dev`, `examples/Components/conversation-ollama.yaml` targets Ollama Cloud**, not a local
+  Ollama: `conversation.openai` against `https://ollama.com/v1`, model `gpt-oss:20b`, with the key
+  read from `OLLAMA_API_KEY` via `envvar-secretstore.yaml`. This overrides AGENTS.md's
+  "needs Ollama serving `ministral-3:3b`". The key lives in the git-ignored `.env` at the repo
+  root; load it into the `dapr run` shell with `set -a; . ./.env; set +a`. Never print it.
 - **`dev` is the fork's default branch on GitHub**, so new PRs target `dev` by default. A PR
   meant for upstream must explicitly target `diagridio/dotnet-ai:master`.
 - Changes meant for upstream go from a branch off `upstream/master`, not from `dev`, so they do

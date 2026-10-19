@@ -1,11 +1,31 @@
+# Ollama Cloud (https://ollama.com) through its OpenAI-compatible API, so no
+# local Ollama install is needed. The component keeps the name
+# `conversation-ollama` that the examples reference.
+#
+# Uses `conversation.openai` because `conversation.ollama` documents no API-key
+# field. The key is read from the OLLAMA_API_KEY environment variable of the
+# `dapr run` shell via envvar-secretstore.yaml; create one at
+# https://ollama.com/settings/keys. Cloud model names: GET https://ollama.com/api/tags
+#
+# To go back to a local Ollama instead: type `conversation.ollama`, model
+# `ministral-3:3b`, and drop `endpoint`, `key` and `auth`.
 apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
   name: conversation-ollama
 spec:
-  type: conversation.ollama
+  type: conversation.openai
+  version: v1
   metadata:
+    - name: endpoint
+      value: https://ollama.com/v1
     - name: model
-      value: ministral-3:3b
+      value: gpt-oss:20b
+    - name: key
+      secretKeyRef:
+        name: OLLAMA_API_KEY
+        key: OLLAMA_API_KEY
     - name: cacheTTL
       value: 0
+auth:
+  secretStore: envvar-secretstore

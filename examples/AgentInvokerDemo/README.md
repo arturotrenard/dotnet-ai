@@ -9,13 +9,17 @@ still runs inside Dapr Workflow activities under the hood.
 - [Dapr CLI](https://docs.dapr.io/getting-started/install-dapr-cli/)
 - [Initialized Dapr environment](https://docs.dapr.io/getting-started/installation)
 - [Dapr .NET SDK](https://docs.dapr.io/developing-applications/sdks/dotnet/)
-- [Ollama](https://ollama.com/) installed
+- An [Ollama Cloud](https://ollama.com) API key (create one at https://ollama.com/settings/keys) —
+  no local Ollama install is needed. `Components/conversation-ollama.yaml` points at
+  `https://ollama.com/v1` with the `gpt-oss:20b` model.
 
 ## Running the example
 
-From the `\examples\` directory, start the Dapr runtime:
+From the `\examples\` directory, export your key and start the Dapr runtime in the same shell
+(the sidecar reads it through `Components/envvar-secretstore.yaml`):
 
 ```sh
+export OLLAMA_API_KEY="your_api_key"
 dapr run --app-id invokerapp --dapr-grpc-port 50001 --dapr-http-port 3500 --resources-path "Components/"
 ```
 
@@ -47,11 +51,13 @@ This endpoint requests JSON output and deserializes it using a source-generated 
 
 ### Observing workflow-backed execution
 
-Watch the application logs while making requests. You should see activity logs like:
+Watch the application logs while making requests. The invoker logs
 
 ```
-Invoking agent InvokerAgent with message '...'
+Running agent 'InvokerAgent' (chat client key '...', message length ..., has session False, has options False)
 ```
 
-These logs indicate that even though the invocation happens via DI, the actual agent execution runs
-inside a workflow activity.
+before it schedules the `AgentRunWorkflow`. The sidecar log then shows that workflow instance
+completing, which is the evidence that the call ran through Dapr Workflow even though it was
+invoked via DI. A missing or wrong key surfaces as `401: Unauthorized` from the
+`CallLlmActivity`.
