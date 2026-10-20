@@ -4,8 +4,13 @@ A small team of agents improves a runtime skill by using it. It publishes a new 
 skill **only when a deterministic backtest says the change is better**.
 
 The task is to compute the BTCUSDT support and resistance zones on Binance 30m candles for a cutoff
-time. The skill is [`skills/btc-support-resistance`](skills/btc-support-resistance/SKILL.md): a
-`SKILL.md` plus `scripts/levels.py`, which does all the reading and the math deterministically.
+time. The skill is a class-based MAF skill, [`BtcSupportResistanceSkill`](BtcSupportResistanceSkill.cs):
+
+- its `levels` script runs deterministic C# ([`Market/Levels.cs`](Market/Levels.cs)) over closed
+  candles, so the model never does the math;
+- the published version lives in [`skill/params.json`](skill/params.json);
+- the changelog lives in [`skill/methodology.md`](skill/methodology.md), exposed to the agent as the
+  `methodology` resource.
 
 ## The pattern
 
@@ -13,43 +18,35 @@ time. The skill is [`skills/btc-support-resistance`](skills/btc-support-resistan
 
 | Step | Who | What |
 |---|---|---|
-| 1 | `PrepareBaselineActivity` | caches the candles and scores the published skill with `backtest/backtest.py` |
-| 2 | **AnalystAgent** | does the task with the skill (`levels.py`) and reports the zones |
-| 3 | **EngineerAgent** | reads where the skill fails and writes one plugin (`features/<name>.py`) aimed at it |
-| 4 | `EvaluatePluginActivity` | validates the plugin in a sandbox and backtests it; a sandbox rejection goes back to the engineer, up to 3 attempts |
+| 1 | `PrepareBaselineActivity` | scores the published skill: readiness per side on test, failures by regime on train |
+| 2 | **AnalystAgent** | does the task with the skill and reports the zones |
+| 3 | **EngineerAgent** | reads where the skill fails and proposes new parameters for one side |
+| 4 | `EvaluateProposalActivity` | validates the proposal against the parameter catalogue and backtests it against the published version; an invalid proposal goes back to the engineer, up to 3 attempts |
 | 5 | **SkillCuratorAgent** | writes the lesson |
-| 6 | `PublishActivity` | if the backtest promoted the plugin, publishes it as the next skill version |
+| 6 | `PublishActivity` | if the backtest promoted the proposal, publishes it as the next skill version |
 
 The split is the point:
 
-- **Agents only propose:** a plugin and a lesson.
-- **Activities measure and decide:** the sandbox check, the verdict and the publication.
+- **Agents only propose:** parameters and a lesson.
+- **Activities validate, measure and decide.**
 
 No model can talk a change into the skill, and the workflow replays to the same decisions.
 
+The engineer proposes **parameters, not code**. A skill version is a set of values from a fixed
+catalogue (`LevelParams.Catalogue`): scoring weights, trend gate, abstention threshold, carry-over,
+and so on. Each value has a range, and anything outside the catalogue is rejected before it runs.
+Learning stays deterministic and safe, with no generated code to sandbox.
+
 ### When a change is "better"
 
-A side (support or resistance) improves when, on a held-out test split of 2026 data, three
-conditions hold:
+A side (support or resistance) improves when, on a held-out test split of 2026 data
+([`Market/Backtest.cs`](Market/Backtest.cs)), three conditions hold:
 
 1. Coverage stays at 70% or more.
-2. Precision beats a zone placed at random.
-3. Precision beats the published version.
+2. Precision beats a zone placed at random (binomial test).
+3. Precision beats the published version (paired bootstrap).
 
-`backtest/backtest.py` and `references/methodology.md` give the details.
-
-### Plugins are untrusted code
-
-The engineer's code is model output, so `levels.py` validates every plugin before it runs. It
-allows:
-
-- `import math` only;
-- attributes from a whitelist only;
-- pure builtins only.
-
-Each call has a time limit, and the backtest runs candidates in an offline,
-resource-limited `python3 -I` process with a scrubbed environment. These layers are not an
-OS-level sandbox; in production, run the evaluation in a container without network access.
+[`skill/methodology.md`](skill/methodology.md) defines precision and coverage.
 
 ## Going further
 
@@ -63,16 +60,13 @@ This example is the minimal shape of the pattern. It grows naturally in several 
 
 ## Run
 
-Prerequisites:
-
-- `dapr init`;
-- `python3` 3.9 or newer (stdlib only);
-- network access to the Binance public API, for the candles.
+You need `dapr init` and network access to the Binance public API, for the candles. The candles
+are cached under the git-ignored `workspace/`.
 
 The agents use the `conversation-ollama` component in `examples/Components/`. The analyst calls the
-skill's tools, and the engineer writes Python that has to pass the sandbox. A small local model is
-unlikely to do either reliably, so point the component at a capable, tool-calling model first, for
-example a larger local Ollama model or a hosted one through `conversation.openai`.
+skill's script and the engineer reasons over backtest results. A small local model is unlikely to do
+either reliably, so point the component at a capable, tool-calling model first, for example a larger
+local Ollama model or a hosted one through `conversation.openai`.
 
 From `examples/`:
 
@@ -91,7 +85,6 @@ curl -s localhost:5061/learn/<instanceId>
 Without the agents:
 
 ```
-python3 backtest/backtest.py --prefetch                   # cache the 2026 candles
-python3 backtest/backtest.py --report report.json         # verdict + failures by regime
-python3 skills/btc-support-resistance/scripts/levels.py levels --end 2026-10-19T00:00:00Z
+dotnet run -- --backtest                                           # score the published skill
+dotnet run -- --backtest --propose support '{"trend_gate_pct": 3}' # judge a proposal like the workflow does
 ```

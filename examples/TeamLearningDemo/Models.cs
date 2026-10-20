@@ -17,11 +17,14 @@ namespace TeamLearningDemo;
 public sealed record LearnRequest(
     [property: JsonPropertyName("cutoff")] DateTime? Cutoff = null);
 
-/// <param name="Published">True when the backtest promoted the plugin and it became the next version.</param>
+/// <param name="Proposal">The engineer's proposal as JSON: side, parameter changes, rationale.</param>
+/// <param name="Stage">"invalid", "rejected_by_backtest" or "promoted".</param>
+/// <param name="Published">True when the backtest promoted the proposal and it became the next version.</param>
 public sealed record LearnResult(
     [property: JsonPropertyName("taskReport")] string TaskReport,
-    [property: JsonPropertyName("plugin")] string? Plugin,
-    [property: JsonPropertyName("verdict")] string Verdict,
+    [property: JsonPropertyName("proposal")] string? Proposal,
+    [property: JsonPropertyName("stage")] string Stage,
+    [property: JsonPropertyName("verdict")] string VerdictJson,
     [property: JsonPropertyName("published")] bool Published,
     [property: JsonPropertyName("version")] int Version,
     [property: JsonPropertyName("lesson")] string Lesson);
@@ -33,21 +36,22 @@ public sealed record Baseline(
     [property: JsonPropertyName("verdictJson")] string VerdictJson,
     [property: JsonPropertyName("reportJson")] string ReportJson);
 
-public sealed record PluginInput(
-    [property: JsonPropertyName("runId")] string RunId,
-    [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("code")] string Code);
+/// <param name="ChangesJson">A JSON object of parameter overrides, e.g. {"trend_gate_pct": 3}.</param>
+public sealed record ProposalInput(
+    [property: JsonPropertyName("side")] string Side,
+    [property: JsonPropertyName("changesJson")] string ChangesJson);
 
-/// <param name="Stage">"rejected_by_sandbox", "rejected_by_backtest" or "promoted".</param>
-/// <param name="ResultJson">The sandbox error, or the backtest's verdict for the plugin.</param>
-public sealed record PluginVerdict(
-    [property: JsonPropertyName("stage")] string Stage,
+/// <param name="Valid">False when the proposal used unknown parameters or values out of range.</param>
+/// <param name="ResultJson">The validation error, or the backtest verdict against the published version.</param>
+public sealed record ProposalVerdict(
+    [property: JsonPropertyName("valid")] bool Valid,
     [property: JsonPropertyName("promote")] bool Promote,
     [property: JsonPropertyName("resultJson")] string ResultJson);
 
 public sealed record PublishInput(
     [property: JsonPropertyName("runId")] string RunId,
     [property: JsonPropertyName("baseVersion")] int BaseVersion,
-    [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("resultJson")] string ResultJson,
+    [property: JsonPropertyName("side")] string Side,
+    [property: JsonPropertyName("changesJson")] string ChangesJson,
+    [property: JsonPropertyName("rationale")] string Rationale,
     [property: JsonPropertyName("lesson")] string Lesson);
