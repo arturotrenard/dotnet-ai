@@ -11,7 +11,7 @@ still runs inside Dapr Workflow activities under the hood.
 - [Dapr .NET SDK](https://docs.dapr.io/developing-applications/sdks/dotnet/)
 - An [Ollama Cloud](https://ollama.com) API key (create one at https://ollama.com/settings/keys) —
   no local Ollama install is needed. `Components/conversation-ollama.yaml` points at
-  `https://ollama.com/v1` with the `gpt-oss:20b` model.
+  `https://ollama.com/v1` with the `glm-5.3:cloud` model.
 
 ## Running the example
 

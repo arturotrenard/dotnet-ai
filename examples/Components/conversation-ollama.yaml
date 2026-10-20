@@ -20,7 +20,7 @@ spec:
     - name: endpoint
       value: https://ollama.com/v1
     - name: model
-      value: gpt-oss:20b
+      value: glm-5.3:cloud
     - name: key
       secretKeyRef:
         name: OLLAMA_API_KEY

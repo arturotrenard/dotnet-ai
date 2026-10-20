@@ -25,7 +25,7 @@ conflicts with AGENTS.md's git and CI notes, this section wins:
   edited, so that `master` stays identical to upstream. Do not re-enable it, and do not push
   tags to the fork expecting a NuGet publish.
 - **On `dev`, `examples/Components/conversation-ollama.yaml` targets Ollama Cloud**, not a local
-  Ollama: `conversation.openai` against `https://ollama.com/v1`, model `gpt-oss:20b`, with the key
+  Ollama: `conversation.openai` against `https://ollama.com/v1`, model `glm-5.3:cloud`, with the key
   read from `OLLAMA_API_KEY` via `envvar-secretstore.yaml`. This overrides AGENTS.md's
   "needs Ollama serving `ministral-3:3b`". The key lives in the git-ignored `.env` at the repo
   root; load it into the `dapr run` shell with `set -a; . ./.env; set +a`. Never print it.
