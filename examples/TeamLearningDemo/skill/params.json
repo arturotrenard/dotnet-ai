@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "notes": "v1: per-side PARAMS chosen by `backtest.py --search 1500` on the 2026 train split only.",
+  "notes": "v1: per-side parameters chosen by a random search on the 2026 train split only.",
   "support": {
     "swing_k": 4, "zone_anchor": 1.0, "min_distance_pct": 0.0, "min_distance_atr": 1.0,
     "w_touches": 0.0, "w_volume": 2.0, "w_reaction": 1.0, "w_recency": 0.5, "w_confluence": 1.0,

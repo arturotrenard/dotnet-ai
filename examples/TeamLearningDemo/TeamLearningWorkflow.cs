@@ -11,23 +11,23 @@
 // the Apache License, Version 2.0.
 
 using System.Globalization;
-using System.Text.RegularExpressions;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Dapr.Workflow;
 using Diagrid.AI.Microsoft.AgentFramework.Runtime;
 
 namespace TeamLearningDemo;
 
 /// <summary>
-/// One learning run: the analyst does the task with the published skill, the engineer proposes a
-/// plugin aimed at where the skill fails, the backtest judges it, and the plugin becomes the next
-/// skill version only if it is promoted. The curator records the lesson either way.
+/// One learning run: the analyst does the task with the published skill, the engineer proposes new
+/// parameters aimed at where the skill fails, the backtest judges them, and they become the next skill
+/// version only if they are promoted. The curator records the lesson either way.
 /// </summary>
 /// <remarks>
-/// Agents only propose; the sandbox check, the backtest verdict and the publication are
-/// activities. The workflow body is deterministic: it branches only on recorded activity and agent
-/// results, so it replays to the same decisions.
+/// Agents only propose; validation, the verdict and the publication are activities. The workflow body
+/// branches only on recorded activity and agent results, so it replays to the same decisions.
 /// </remarks>
-public sealed partial class TeamLearningWorkflow : Workflow<LearnRequest, LearnResult>
+public sealed class TeamLearningWorkflow : Workflow<LearnRequest, LearnResult>
 {
     private const int EngineerAttempts = 3;
 
@@ -42,60 +42,72 @@ public sealed partial class TeamLearningWorkflow : Workflow<LearnRequest, LearnR
         // 1. The task, done with the published skill.
         var analyst = await context.RunAgentAsync(context.GetAgent("AnalystAgent"),
             $"Using the btc-support-resistance skill, report the BTCUSDT support and resistance zones for the "
-            + $"cutoff {cutoff}. Run the skill's levels script with --end {cutoff} and return the report JSON "
-            + "the skill defines.");
+            + $"cutoff {cutoff}: run its levels script with that cutoff and return the report JSON the skill defines.");
         var taskReport = analyst.Text ?? string.Empty;
 
-        // 2. The engineer studies the backtest and proposes one plugin; the sandbox may send it back.
+        // 2. The engineer studies the backtest and proposes new parameters; invalid ones go back to it.
         var engineer = context.GetAgent("EngineerAgent");
         var history = new List<WorkflowChatMessage>();
-        var message = $"The published skill (v{baseline.Version}) on the test split:\n{baseline.VerdictJson}\n\n"
+        var message = $"The published skill (v{baseline.Version}), per side, on the test split:\n{baseline.VerdictJson}\n\n"
                       + $"Its precision and coverage by regime on the train split:\n{baseline.ReportJson}\n\n"
-                      + "Find the weakness that matters most (a large group of windows where precision is low) and "
-                      + "write one plugin that adds price levels aimed at it.";
-        string? plugin = null;
-        var verdict = new PluginVerdict("no_plugin", false, "{}");
+                      + "Find the weakness that matters most (a large group of windows with low precision) and propose "
+                      + "parameter changes for one side aimed at it.";
+        JsonObject? proposal = null;
+        var verdict = new ProposalVerdict(false, false, "{}");
         for (var attempt = 1; attempt <= EngineerAttempts; attempt++)
         {
             var turn = await context.RunAgentWithHistoryAsync(engineer, message, history);
             history.AddRange(turn.TurnMessages);
-            var code = PythonBlock().Match(turn.Response.Text ?? string.Empty) is { Success: true } m
-                ? m.Groups[1].Value.Trim() + "\n" : null;
-            plugin = code is null ? null : PluginName().Match(code) is { Success: true } n ? n.Groups[1].Value : null;
-            if (code is null || plugin is null)
+            proposal = ParseObject(turn.Response.Text);
+            if (proposal?["side"]?.GetValue<string>() is not { } side || proposal["changes"] is not JsonObject changes)
             {
-                message = "Return the complete module in one ```python block, with NAME = \"lower_snake_case\".";
+                message = """Answer with only the JSON object: {"side": "...", "changes": {...}, "rationale": "..."}.""";
                 continue;
             }
-            verdict = await context.CallActivityAsync<PluginVerdict>(nameof(EvaluatePluginActivity),
-                new PluginInput(runId, plugin, code));
-            if (verdict.Stage != "rejected_by_sandbox")
+            verdict = await context.CallActivityAsync<ProposalVerdict>(nameof(EvaluateProposalActivity),
+                new ProposalInput(side, changes.ToJsonString()));
+            if (verdict.Valid)
             {
                 break;
             }
-            message = $"The sandbox rejected the plugin:\n{verdict.ResultJson}\nFix it and return the complete module.";
+            message = $"The proposal was rejected before testing:\n{verdict.ResultJson}\nFix it and answer with the JSON again.";
         }
+        var stage = !verdict.Valid ? "invalid" : verdict.Promote ? "promoted" : "rejected_by_backtest";
 
         // 3. The curator records what was learned; it does not change the verdict.
         var curator = await context.RunAgentAsync(context.GetAgent("SkillCuratorAgent"),
-            $"Plugin '{plugin ?? "(none)"}' ended as '{verdict.Stage}'. Backtest result:\n{verdict.ResultJson}\n\n"
-            + "In two or three sentences, write the lesson for the team: why it likely worked or failed, "
-            + "and what to try next. Use only the numbers given.");
+            $"Proposal: {proposal?.ToJsonString() ?? "(none)"}\nIt ended as '{stage}'. Backtest result:\n{verdict.ResultJson}\n\n"
+            + "In two or three sentences, write the lesson for the team: why it likely worked or failed, and what "
+            + "to try next. Use only the numbers given.");
         var lesson = curator.Text ?? string.Empty;
 
         // 4. Publish only what the backtest promoted.
         var version = baseline.Version;
-        if (verdict.Promote && plugin is not null)
+        if (verdict.Promote && proposal is not null)
         {
-            version = await context.CallActivityAsync<int>(nameof(PublishActivity),
-                new PublishInput(runId, baseline.Version, plugin, verdict.ResultJson, lesson));
+            version = await context.CallActivityAsync<int>(nameof(PublishActivity), new PublishInput(runId, baseline.Version,
+                proposal["side"]!.GetValue<string>(), proposal["changes"]!.ToJsonString(),
+                proposal["rationale"]?.ToString() ?? "", lesson));
         }
-        return new LearnResult(taskReport, plugin, verdict.Stage, verdict.Promote, version, lesson);
+        return new LearnResult(taskReport, proposal?.ToJsonString(), stage, verdict.ResultJson, verdict.Promote, version, lesson);
     }
 
-    [GeneratedRegex(@"```(?:python|py)?\s*\n(.*?)```", RegexOptions.Singleline)]
-    private static partial Regex PythonBlock();
-
-    [GeneratedRegex("^NAME\\s*=\\s*[\"']([a-z][a-z0-9_]{2,40})[\"']", RegexOptions.Multiline)]
-    private static partial Regex PluginName();
+    /// <summary>The outermost JSON object in a model's answer (models wrap JSON in prose or fences).</summary>
+    private static JsonObject? ParseObject(string? text)
+    {
+        var start = text?.IndexOf('{') ?? -1;
+        var end = text?.LastIndexOf('}') ?? -1;
+        if (start < 0 || end <= start)
+        {
+            return null;
+        }
+        try
+        {
+            return JsonNode.Parse(text![start..(end + 1)]) as JsonObject;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 }

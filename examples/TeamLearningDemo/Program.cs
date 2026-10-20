@@ -11,82 +11,93 @@
 // the Apache License, Version 2.0.
 
 // A small team of agents learns a skill by doing a task with it: the analyst uses the skill, the
-// engineer proposes an improvement as a sandboxed plugin, a deterministic backtest decides, and
-// the improvement is published as the next skill version only if it is measurably better.
+// engineer proposes better parameters, a deterministic backtest decides, and the proposal is
+// published as the next skill version only if it is measurably better.
 
 using System.Text.Json;
 using Dapr.Workflow;
 using Diagrid.AI.Microsoft.AgentFramework.Hosting;
-using Microsoft.Agents.AI;
 using TeamLearningDemo;
+using TeamLearningDemo.Market;
 
 var builder = WebApplication.CreateBuilder(args);
 
 var paths = new TeamPaths(builder.Environment.ContentRootPath);
-var python = new PythonRunner(paths);
+var store = new CandleStore(new HttpClient { Timeout = TimeSpan.FromSeconds(30) }, paths.CandleCache);
+
+// Without any agent:
+//   dotnet run -- --backtest                                        score the published skill
+//   dotnet run -- --backtest --propose support '{"min_score": 2}'   judge a proposal like the workflow does
+if (args.Contains("--backtest"))
+{
+    var published = SkillParams.Parse(await File.ReadAllTextAsync(paths.ParamsFile));
+    var backtest = await Backtest.LoadAsync(store);
+    Console.WriteLine($"skill v{published.Version}; {backtest.Range}");
+    var propose = Array.IndexOf(args, "--propose");
+    if (propose >= 0 && propose + 2 < args.Length)
+    {
+        var side = args[propose + 1];
+        var candidate = published.WithChanges(side, System.Text.Json.Nodes.JsonNode.Parse(args[propose + 2])!.AsObject());
+        Console.WriteLine($"{side}: {JsonSerializer.Serialize(backtest.Verdict(side, candidate.For(side), published.For(side)))}");
+        return;
+    }
+    foreach (var side in Levels.Sides)
+    {
+        Console.WriteLine($"{side}: {JsonSerializer.Serialize(backtest.Verdict(side, published.For(side), baseline: null))}");
+    }
+    return;
+}
+
 builder.Services.AddSingleton(paths);
-builder.Services.AddSingleton(python);
+builder.Services.AddSingleton(store);
+
+var catalogue = string.Join("\n", LevelParams.Catalogue.Select(c => $"- {c.Key}: {c.Value.Min} to {c.Value.Max}"
+                                                                    + (c.Value.Integer ? " (integer)" : "")));
 
 builder.Services.AddDaprAgents(registrations: opt =>
     {
         opt.RegisterWorkflow<TeamLearningWorkflow>();
         opt.RegisterActivity<PrepareBaselineActivity>();
-        opt.RegisterActivity<EvaluatePluginActivity>();
+        opt.RegisterActivity<EvaluateProposalActivity>();
         opt.RegisterActivity<PublishActivity>();
     })
     .WithAgent(
         agentName: "AnalystAgent",
         conversationComponentName: "conversation-ollama",
         instructions: """
-                      You are the team's analyst. You answer with the btc-support-resistance skill: load it,
-                      run its levels script, and report exactly what the script returns, in the report format
-                      the skill defines. You never compute or estimate prices yourself.
+                      You are the team's analyst. You answer with the btc-support-resistance skill: load it, run
+                      its levels script, and report exactly what the script returns, in the report format the
+                      skill defines. You never compute or estimate prices yourself.
                       """,
         serviceLifetime: ServiceLifetime.Singleton)
-    .WithSkills("AnalystAgent", skills => skills
-        // Only scripts/levels.py is a script: features/*.py are plugins that levels.py loads itself,
-        // after validating them, and must never be run directly.
-        .UseFileSkill(paths.SkillDirectory,
-            new AgentFileSkillsSourceOptions { ScriptFilter = f => f.RelativeFilePath == "scripts/levels.py" },
-            scriptRunner: async (_, script, arguments, _, ct) =>
-            {
-                var args = arguments is { ValueKind: JsonValueKind.Array } a
-                    ? a.EnumerateArray().Select(e => e.ToString())
-                    : arguments?.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries) ?? [];
-                var result = await python.RunAsync(script.FullPath, args, TimeSpan.FromMinutes(2), cancellationToken: ct);
-                return result.ExitCode == 0 ? result.Stdout : $"exit code {result.ExitCode}\n{result.Stdout}{result.Stderr}";
-            }))
+    .WithSkills("AnalystAgent", skills => skills.UseSkill(new BtcSupportResistanceSkill(store, paths)))
     .WithAgent(
         agentName: "EngineerAgent",
         conversationComponentName: "conversation-ollama",
-        instructions: """
-                      You are the team's engineer. You read backtest results of the team's skill and write one
-                      plugin for its levels.py that adds price levels where the skill fails. A sandbox rejects
-                      anything outside these rules:
+        instructions: $$"""
+                        You are the team's engineer. You read backtest results of the team's skill and propose new
+                        parameters for one side (support or resistance) aimed at where it fails. A precision gain
+                        only counts if coverage stays at or above 70%.
 
-                      - One Python module. The only import allowed is `import math`.
-                      - Module-level string literals: NAME = "<lower_snake_case>", DESCRIPTION = "<one line>",
-                        SOURCE = "<where the idea comes from>".
-                      - `def levels(candles):` gets the 336 closed 30-minute BTCUSDT candles before the cutoff,
-                        oldest first, as dicts with keys t, o, h, l, c, v. Do not modify them.
-                      - Return at most 50 dicts {"level": <positive float price>}; the skill assigns the side by
-                        comparing each level with the last close.
-                      - Only arithmetic, control flow, comprehensions, helper functions, lists, dicts, tuples
-                        and the builtins abs all any bool dict enumerate filter float int isinstance len list
-                        map max min range reversed round set sorted sum tuple zip. Attributes only for math
-                        functions and list/dict methods. No string methods, print, classes, names starting
-                        with an underscore, global/nonlocal, with or yield. Under 2 s per call.
+                        Parameters you may change, with their allowed ranges (anything else is rejected):
+                        {{catalogue}}
 
-                      Answer with the complete module in a single ```python block.
-                      """,
+                        trend_gate_pct makes a side abstain after a 7-day move against it larger than that percent;
+                        min_score makes it abstain when its best level is weak; carry_days keeps an unbroken zone
+                        from the previous day when it abstains. The w_* weights score levels by touches, volume,
+                        reaction volume, recency, confluence, role flips and distance.
+
+                        Answer with only this JSON:
+                        {"side": "support" | "resistance", "changes": {"<parameter>": <number>, ...}, "rationale": "..."}
+                        """,
         serviceLifetime: ServiceLifetime.Singleton)
     .WithAgent(
         agentName: "SkillCuratorAgent",
         conversationComponentName: "conversation-ollama",
         instructions: """
-                      You are the team's skill curator. You turn the outcome of a learning run into a short
-                      lesson. The backtest decides what is published; you never change or second-guess its
-                      verdict, and you never report a number you were not given.
+                      You are the team's skill curator. You turn the outcome of a learning run into a short lesson.
+                      The backtest decides what is published; you never change or second-guess its verdict, and you
+                      never report a number you were not given.
                       """,
         serviceLifetime: ServiceLifetime.Singleton);
 
@@ -100,7 +111,7 @@ app.MapPost("/learn", async (DaprWorkflowClient client, LearnRequest? request) =
     return Results.Accepted($"/learn/{id}", new { instanceId = id });
 });
 
-// GET /learn/{id} — status, then the outcome: task report, plugin, verdict, published version, lesson.
+// GET /learn/{id} — status, then the outcome: task report, proposal, verdict, published version, lesson.
 app.MapGet("/learn/{id}", async (DaprWorkflowClient client, string id, CancellationToken ct) =>
     await client.GetWorkflowStateAsync(id, cancellation: ct) is { } state
         ? Results.Ok(new

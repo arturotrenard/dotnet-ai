@@ -4,8 +4,8 @@
         <TargetFramework>net10.0</TargetFramework>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
-        <!-- MAF's Skills API (AgentSkillsProviderBuilder, AgentFileSkillsSourceOptions, ...) is
-             marked [Experimental("MAAI001")] upstream. -->
+        <!-- MAF's Skills API (AgentClassSkill, AgentSkillsProviderBuilder, ...) is marked
+             [Experimental("MAAI001")] upstream. -->
         <NoWarn>$(NoWarn);MAAI001</NoWarn>
     </PropertyGroup>
 
@@ -18,11 +18,11 @@
     </ItemGroup>
 
     <ItemGroup>
-        <!-- skills/ and backtest/ are used in place from the project directory (the learning
-             workflow writes new skill versions into skills/), so they are not copied to bin/. -->
+        <!-- skill/ is used in place from the project directory (the learning workflow writes new
+             skill versions into it), so it is not copied to bin/. workspace/ is the candle cache. -->
         <None Remove="workspace\**" />
         <Content Remove="workspace\**" />
-        <Content Update="skills\**\*.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+        <Content Update="skill\**\*.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     </ItemGroup>
 
 </Project>
