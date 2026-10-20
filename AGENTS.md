@@ -9,7 +9,7 @@ re-checked 2026-10-18), and against `diagrid` CLI **v1.66.0**
 logged in to production for every CLI claim. Re-check the CLI lines against a
 newer version rather than trusting this file.
 
-## Layout: two shipping projects, three test projects, ten examples
+## Layout: two shipping projects, three test projects, eleven examples
 
 | Path | What it is |
 |---|---|
@@ -18,7 +18,7 @@ newer version rather than trusting this file.
 | `test/…AgentFramework.Test/` | unit tests for the runtime |
 | `test/Diagrid.AI.Identity.Test/` | unit tests for Identity |
 | `test/…AgentFramework.IntegrationTest/` | integration tests, `OutputType=Exe`, needs Docker |
-| `examples/*/` | ten ASP.NET Core samples, plus `examples/Components/` (Dapr YAML, not a project) |
+| `examples/*/` | eleven ASP.NET Core samples, plus `examples/Components/` (Dapr YAML, not a project) |
 
 - **`Diagrid.AI.Identity` is `[Experimental("DGRDID001")]` for the whole
   assembly** (`src/Diagrid.AI.Identity/AssemblyInfo.cs`). Every consumer must
@@ -28,7 +28,7 @@ newer version rather than trusting this file.
   widening `NoWarn`.
 
 - **One solution, and it is the unit of work.** `Diagrid.AI.Microsoft.AgentFramework.sln`
-  holds all fifteen projects; CI runs bare `dotnet restore` / `build` / `pack`
+  holds all sixteen projects; CI runs bare `dotnet restore` / `build` / `pack`
   from the root and lets the solution fan out. There is no `Makefile` and no
   per-project script. Add any new project to the `.sln` in the same commit — the
   `build` job will not see it otherwise, while the test jobs *will* (they
