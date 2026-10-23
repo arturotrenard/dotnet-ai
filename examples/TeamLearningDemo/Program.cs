@@ -99,7 +99,9 @@ builder.Services.AddDaprAgents(registrations: opt =>
                       The backtest decides what is published; you never change or second-guess its verdict, and you
                       never report a number you were not given.
                       """,
-        serviceLifetime: ServiceLifetime.Singleton);
+        serviceLifetime: ServiceLifetime.Singleton)
+    // A cloud model reasoning over backtest results can take longer than the 100-second default.
+    .WithLlmTimeout(TimeSpan.FromMinutes(5));
 
 var app = builder.Build();
 
