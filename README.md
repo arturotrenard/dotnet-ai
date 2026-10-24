@@ -116,6 +116,30 @@ public sealed partial class SampleWorkflow : Workflow<string, string>
 }
 ```
 
+### Detached agent runs
+`StartAgentRunDetachedAsync` starts an agent run from a workflow without waiting for it, and
+returns the run's instance ID. The run is independent of the calling workflow: a failed run does
+not fail the caller, and terminating the caller does not terminate the run. Use it for
+fire-and-forget work such as notifications or follow-ups.
+
+```csharp
+public sealed class OrderWorkflow : Workflow<Order, string>
+{
+    public override async Task<string> RunAsync(WorkflowContext context, Order order)
+    {
+        // ... the order work the caller waits for ...
+        var runId = await context.StartAgentRunDetachedAsync(
+            context.GetAgent("NotifierAgent"),
+            message: $"Tell the customer order {order.Id} has shipped.");
+        return runId;
+    }
+}
+```
+
+The run's `AgentRunResult` is its workflow output, readable through `DaprWorkflowClient` with
+the returned ID. Detached runs need a **Dapr 1.19 or newer sidecar**; an older one retries the
+unknown action indefinitely, so the calling workflow stalls.
+
 ## Skills
 Skills are portable packages of instructions, reference material, and scripts that give an agent
 domain-specific expertise at runtime — complementary to Tools. They're discovered via a skills
