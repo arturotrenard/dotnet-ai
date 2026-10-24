@@ -112,3 +112,15 @@ jobs:
             --framework ${{ matrix.framework }} \
             /p:RuntimeIdentifier=linux-x64
         timeout-minutes: 45
+      # Re-run the suite with every workflow payload offloaded to an in-memory
+      # binary store (WithBinaryStorePayloads), once, on the newest framework.
+      - name: Test with binary store payloads
+        if: matrix.framework == 'net10.0'
+        env:
+          DAPR_BINARY_STORE_PAYLOADS: "1"
+        run: |
+          dotnet test "${{ matrix.project }}" \
+            --configuration Release \
+            --framework ${{ matrix.framework }} \
+            /p:RuntimeIdentifier=linux-x64
+        timeout-minutes: 45
