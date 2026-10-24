@@ -111,6 +111,30 @@ public sealed partial class SampleWorkflow : Workflow<string, string>
 }
 ```
 
+### Detached agent runs
+`StartAgentRunDetachedAsync` starts an agent run from a workflow without waiting for it, and
+returns the run's instance ID. The run is independent of the calling workflow: a failed run does
+not fail the caller, and terminating the caller does not terminate the run. Use it for
+fire-and-forget work such as notifications or follow-ups.
+
+```csharp
+public sealed class OrderWorkflow : Workflow<Order, string>
+{
+    public override async Task<string> RunAsync(WorkflowContext context, Order order)
+    {
+        // ... the order work the caller waits for ...
+        var runId = await context.StartAgentRunDetachedAsync(
+            context.GetAgent("NotifierAgent"),
+            message: $"Tell the customer order {order.Id} has shipped.");
+        return runId;
+    }
+}
+```
+
+The run's `AgentRunResult` is its workflow output, readable through `DaprWorkflowClient` with
+the returned ID. Detached runs need a **Dapr 1.19 or newer sidecar**; an older one retries the
+unknown action indefinitely, so the calling workflow stalls.
+
 ## LLM call timeouts
 Each LLM call is bounded by a timeout, 100 seconds unless you change it. A slow model, such as one
 running locally, can need more. Set a default for every agent, override it per agent, or pass
