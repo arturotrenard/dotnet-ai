@@ -135,6 +135,39 @@ The run's `AgentRunResult` is its workflow output, readable through `DaprWorkflo
 the returned ID. Detached runs need a **Dapr 1.19 or newer sidecar**; an older one retries the
 unknown action indefinitely, so the calling workflow stalls.
 
+## Large payloads in a binary store
+Every agent turn carries the whole conversation between activities, and each of those payloads is
+written to the workflow history. With Dapr 1.19, payloads above a threshold (64 KiB by default) can
+live in a binary store instead, with only a reference in the history. The SDK uploads and resolves
+them for you, so your workflows and agents do not change:
+
+```csharp
+builder.Services.AddDaprAgents()
+    .WithAgent(/* ... */)
+    .WithBinaryStorePayloads("agent-payloads", options =>
+    {
+        options.OffloadThreshold = 128 * 1024; // optional; 64 KiB by default
+    });
+```
+
+`agent-payloads` is a Dapr binary store component, for example:
+
+```yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: agent-payloads
+spec:
+  type: binarystore.aws.s3   # or azure.blobstorage, gcp.bucket, oci.objectstorage; in-memory for local tests
+  version: v1
+  metadata: [] # store-specific settings
+```
+
+> This needs a **Dapr 1.19 or newer sidecar**, and the store must outlive the workflows that reference
+> it. `binarystore.in-memory` loses its payloads when the sidecar restarts, after which a replaying
+> workflow cannot resolve them, so use it only for local testing. Register `WithBinaryStorePayloads`
+> in every app that hosts or schedules these workflows.
+
 ## LLM call timeouts
 Each LLM call is bounded by a timeout, 100 seconds unless you change it. A slow model, such as one
 running locally, can need more. Set a default for every agent, override it per agent, or pass
