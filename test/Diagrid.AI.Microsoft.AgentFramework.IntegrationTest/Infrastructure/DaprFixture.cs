@@ -209,6 +209,7 @@ public sealed class DaprFixture : IAsyncLifetime
                 {
                     // Custom workflows for WorkflowContextExtensions integration tests.
                     reg.RegisterWorkflow<EchoOrchestrationWorkflow>();
+                    reg.RegisterWorkflow<DetachedEchoOrchestrationWorkflow>();
                     reg.RegisterWorkflow<CapitalOrchestrationWorkflow>();
                     reg.RegisterWorkflow<KeyedOrchestrationWorkflow>();
                 })
