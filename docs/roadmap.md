@@ -258,7 +258,7 @@ Por Dapr Conversation el razonamiento no sale ni entra y el esfuerzo no se puede
   - [x] reenviar el razonamiento del historial en el campo `reasoning`;
   - [x] mandar `reasoning_effort` desde `ChatOptions.Reasoning`, nunca `"none"`.
 - [x] Usarlo solo en los modelos con `"Direct": true` (hoy glm-5.3); el resto sigue en Dapr. Esfuerzo por agente en `AgentReasoning`.
-- [ ] Pasar team_learning_agents al store: `RunAgentInConversationAsync`, con `WithContextWindow` y `WithConversationCompaction`.
+- [x] Pasar team_learning_agents al store (`1c2b860`): el reintento de JSON de `AskAsync` y el turno de cierre de cada sesión continúan una conversación guardada, con TTL de 30 días y respaldo si expira. Ventana de 1M tokens en todos los modelos. Sin compactación: son conversaciones de 2 turnos.
 - [ ] Probar en vivo con glm-5.3:
   - [x] ¿usa el razonamiento reenviado? **Sí**: el mismo historial cuesta 66 tokens de entrada con el razonamiento y 48 sin él (`OllamaLiveTests`, 2026-10-28).
   - [ ] ¿el esfuerzo cambia la profundidad o la calidad? El mecanismo sí: con `low` no devuelve razonamiento y con `high` sí. La calidad queda para el bake-off.
