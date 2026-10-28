@@ -372,20 +372,19 @@ public static class DaprAgentsBuilderExtensions
     // =========================================================================
 
     /// <summary>
-    /// Sets the context window of every agent's model, so each LLM call trims what came before the run to the room
-    /// the run leaves: older tool results are collapsed first, then the oldest messages are dropped. The stored
-    /// history is not changed.
+    /// Sets the context window of every agent's model, so each LLM call leaves out earlier turns, whole and oldest
+    /// first, until it fits. The stored history is not changed.
     /// </summary>
     /// <param name="builder">The agents builder.</param>
     /// <param name="maxContextTokens">The model's context window, in tokens.</param>
     /// <param name="maxOutputTokens">The tokens to keep free for the model's reply.</param>
     /// <returns>The agents builder.</returns>
     /// <remarks>
-    /// Uses Microsoft Agent Framework's <c>ContextWindowCompactionStrategy</c>: above half of the input budget
-    /// (<paramref name="maxContextTokens"/> - <paramref name="maxOutputTokens"/>) it collapses older tool calls and
-    /// their results into short text, and above 80 % it drops the oldest message groups. System messages are always
-    /// kept, and a tool call is never separated from its results. The run's own messages are never trimmed, so a
-    /// single run larger than the window is still sent whole. Tokens are estimated as bytes / 4.
+    /// The budget is <paramref name="maxContextTokens"/> - <paramref name="maxOutputTokens"/>. A turn starts at a user
+    /// message, so the history sent never opens with an assistant message or a tool result, and a tool call always
+    /// travels with its results. The instructions, the context providers' messages and the run's own messages are
+    /// always sent; when they alone exceed the budget, the LLM call fails with
+    /// <see cref="Runtime.ContextWindowExceededException"/>. Tokens are estimated as characters / 4.
     /// </remarks>
     public static IAgentsBuilder WithContextWindow(this IAgentsBuilder builder, int maxContextTokens, int maxOutputTokens)
     {

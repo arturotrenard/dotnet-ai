@@ -196,17 +196,32 @@ public sealed class ConversationStoreRedisTests(DaprFixture fixture)
         await store.AppendTurnAsync(Turn(id, "t1", 0, User("short-lived")), TestContext.Current.CancellationToken);
         Assert.Single((await store.LoadAsync(id, cancellationToken: TestContext.Current.CancellationToken)).Entries);
 
-        var deadline = DateTime.UtcNow.AddSeconds(15);
-        ConversationSnapshot snapshot;
-        do
-        {
-            await Task.Delay(500, TestContext.Current.CancellationToken);
-            snapshot = await store.LoadAsync(id, cancellationToken: TestContext.Current.CancellationToken);
-        }
-        while (snapshot.Entries.Count > 0 && DateTime.UtcNow < deadline);
+        // Nothing reads it in between: a load after half the TTL would renew it.
+        await Task.Delay(TimeSpan.FromSeconds(4), TestContext.Current.CancellationToken);
+        var snapshot = await store.LoadAsync(id, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Empty(snapshot.Entries);
         await Assert.ThrowsAsync<ConversationNotFoundException>(() => store.LoadAsync(id, 1, cancellationToken: TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Ttl_AConversationThatKeepsBeingRead_DoesNotExpire()
+    {
+        await using var provider = CreateStoreProvider(o => o.TimeToLive = TimeSpan.FromSeconds(2));
+        var store = provider.GetRequiredService<IConversationStore>();
+        var id = NewId("ttl-read");
+
+        await store.AppendTurnAsync(Turn(id, "t1", 0, User("kept alive")), TestContext.Current.CancellationToken);
+
+        // Three times the TTL, reading it as a paused run's tool loop would.
+        for (var i = 0; i < 12; i++)
+        {
+            await Task.Delay(500, TestContext.Current.CancellationToken);
+            Assert.Single((await store.LoadAsync(id, 1, cancellationToken: TestContext.Current.CancellationToken)).Entries);
+        }
+
+        var appended = await store.AppendTurnAsync(Turn(id, "t2", 1, User("still here")), TestContext.Current.CancellationToken);
+        Assert.Equal(ConversationAppendStatus.Appended, appended.Status);
     }
 
     /// <summary>

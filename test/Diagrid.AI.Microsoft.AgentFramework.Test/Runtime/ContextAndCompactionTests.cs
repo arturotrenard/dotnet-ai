@@ -56,6 +56,115 @@ public sealed class ContextAndCompactionTests
     }
 
     [Fact]
+    public async Task ContextWindow_DropsWholeTurns_EvenWhenTheLatestEarlierTurnIsTheLargest()
+    {
+        // Review regression: MAF's strategy kept the most recent message groups whatever their size, so this sent
+        // about six times the window and opened the history with an assistant tool call.
+        var (activity, client) = BuildActivity(contextWindows: [new ContextWindowRegistration(null, 4000, 500)]);
+        client.SetNextResponse(finalText: "ok");
+        var bigResult = "\"" + new string('r', 100_000) + "\"";
+        List<WorkflowChatMessage> history =
+        [
+            new() { Role = "user", Content = "task" },
+            new() { Role = "assistant", FunctionCalls = [new WorkflowFunctionCall { CallId = "c1", Name = "tool" }] },
+            new() { Role = "tool", FunctionResults = [new WorkflowFunctionResult { CallId = "c1", Name = "tool", ResultJson = bigResult }] },
+            new() { Role = "assistant", FunctionCalls = [new WorkflowFunctionCall { CallId = "c2", Name = "tool" }] },
+            new() { Role = "tool", FunctionResults = [new WorkflowFunctionResult { CallId = "c2", Name = "tool", ResultJson = bigResult }] },
+            new() { Role = "assistant", Content = "done" },
+            new() { Role = "user", Content = "small question" },
+            new() { Role = "assistant", Content = "small answer" },
+        ];
+
+        await activity.RunAsync(new TestWorkflowActivityContext("i"),
+            new CallLlmInput(AgentName, null, [.. history, new WorkflowChatMessage { Role = "user", Content = "next" }]) { RunMessagesStart = history.Count });
+
+        Assert.Equal(["be brief", "small question", "small answer", "next"], client.LastMessages!.Select(m => m.Text));
+    }
+
+    [Fact]
+    public async Task ContextWindow_SendsTheHistoryStartingAtAUserMessage()
+    {
+        var (activity, client) = BuildActivity(contextWindows: [new ContextWindowRegistration(null, 400, 100)]);
+        client.SetNextResponse(finalText: "ok");
+        var history = Enumerable.Range(0, 30)
+            .SelectMany(i => new[]
+            {
+                new WorkflowChatMessage { Role = "user", Content = $"question {i} " + new string('q', 100) },
+                new WorkflowChatMessage { Role = "assistant", FunctionCalls = [new WorkflowFunctionCall { CallId = $"c{i}", Name = "tool" }] },
+                new WorkflowChatMessage { Role = "tool", FunctionResults = [new WorkflowFunctionResult { CallId = $"c{i}", Name = "tool", ResultJson = "\"" + new string('r', 100) + "\"" }] },
+                new WorkflowChatMessage { Role = "assistant", Content = $"answer {i}" },
+            })
+            .ToList();
+
+        await activity.RunAsync(new TestWorkflowActivityContext("i"),
+            new CallLlmInput(AgentName, null, [.. history, new WorkflowChatMessage { Role = "user", Content = "latest" }]) { RunMessagesStart = history.Count });
+
+        var sent = client.LastMessages!;
+        Assert.InRange(sent.Count, 3, history.Count);
+        Assert.Equal(ChatRole.System, sent[0].Role);
+        Assert.Equal(ChatRole.User, sent[1].Role);
+        Assert.StartsWith("question", sent[1].Text);
+        Assert.Equal(0, (sent.Count - 2) % 4);
+    }
+
+    [Fact]
+    public async Task ContextWindow_ARunThatAloneDoesNotFit_FailsWithoutCallingTheModel()
+    {
+        var (activity, client) = BuildActivity(contextWindows: [new ContextWindowRegistration(null, 1000, 200)]);
+        client.SetNextResponse(finalText: "ok");
+        List<WorkflowChatMessage> run =
+        [
+            new() { Role = "user", Content = "task" },
+            new() { Role = "assistant", FunctionCalls = [new WorkflowFunctionCall { CallId = "c1", Name = "tool" }] },
+            new() { Role = "tool", FunctionResults = [new WorkflowFunctionResult { CallId = "c1", Name = "tool", ResultJson = "\"" + new string('r', 8000) + "\"" }] },
+        ];
+
+        var ex = await Assert.ThrowsAsync<ContextWindowExceededException>(() =>
+            activity.RunAsync(new TestWorkflowActivityContext("i"), new CallLlmInput(AgentName, null, run)));
+
+        Assert.Contains(AgentName, ex.Message);
+        Assert.Contains("1000", ex.Message);
+        Assert.Null(client.LastMessages);
+    }
+
+    [Fact]
+    public async Task ContextWindow_KeepsTheContextProvidersMessages()
+    {
+        var (activity, client) = BuildActivity(contextWindows: [new ContextWindowRegistration(null, 400, 100)]);
+        client.SetNextResponse(finalText: "ok");
+        var history = Enumerable.Range(0, 20)
+            .Select(i => new WorkflowChatMessage { Role = i % 2 == 0 ? "user" : "assistant", Content = $"old {i} " + new string('h', 200) })
+            .ToList();
+
+        await activity.RunAsync(new TestWorkflowActivityContext("i"),
+            new CallLlmInput(AgentName, null, [.. history, new WorkflowChatMessage { Role = "user", Content = "latest" }])
+            {
+                RunMessagesStart = history.Count,
+                AdditionalMessages = [new WorkflowChatMessage { Role = "user", Content = "retrieved memory" }],
+            });
+
+        var sent = client.LastMessages!;
+        Assert.Equal("retrieved memory", sent[1].Text);
+        Assert.Equal("latest", sent[^1].Text);
+        Assert.True(sent.Count < history.Count + 3, $"sent {sent.Count} messages");
+    }
+
+    [Fact]
+    public void SplitTurns_StartsATurnAtEachUserMessage_AndKeepsALeadingSummaryApart()
+    {
+        List<WorkflowChatMessage> history =
+        [
+            new() { Role = "system", Content = "summary" },
+            new() { Role = "user", Content = "a" },
+            new() { Role = "assistant", Content = "b" },
+            new() { Role = "tool" },
+            new() { Role = "user", Content = "c" },
+        ];
+
+        Assert.Equal([1, 3, 1], CallLlmActivity.SplitTurns(history).Select(t => t.Count));
+    }
+
+    [Fact]
     public void ContextWindow_NamedRegistrationOverridesTheDefault()
     {
         ContextWindowRegistration[] registrations =
@@ -286,7 +395,7 @@ public sealed class ContextAndCompactionTests
         var (activity, client) = BuildActivity(contextWindows: [new ContextWindowRegistration(null, 3000, 500)]);
         client.SetNextResponse(finalText: "ok");
         var history = Enumerable.Range(0, 20)
-            .Select(i => new WorkflowChatMessage { Role = i % 2 == 0 ? "user" : "assistant", Content = $"old {i} " + new string('h', 300) })
+            .Select(i => new WorkflowChatMessage { Role = i % 2 == 0 ? "user" : "assistant", Content = $"old {i} " + new string('h', 600) })
             .ToList();
         var run = new List<WorkflowChatMessage> { new() { Role = "user", Content = "CURRENT TASK" } };
         for (var i = 0; i < 9; i++)
