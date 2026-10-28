@@ -11,6 +11,7 @@
 // the Apache License, Version 2.0.
 
 using Dapr.Workflow;
+using Diagrid.AI.Microsoft.AgentFramework.Abstractions;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 
@@ -73,6 +74,9 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
                 Options = input.Options
             });
 
+        // The reasoning replay setting the last LLM call recorded; decides what TurnMessages keep.
+        ReasoningReplay? lastReplay = null;
+
         try
         {
             for (var iteration = 0; iteration < MaxIterations; iteration++)
@@ -87,10 +91,19 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
                 {
                     AdditionalInstructions = agentContext.Instructions,
                     AdditionalMessages = agentContext.Messages,
-                    AdditionalToolNames = agentContext.ToolNames
+                    AdditionalToolNames = agentContext.ToolNames,
+                    RunMessagesStart = turnStartIndex,
+                    Iteration = iteration
                 };
                 var llmOutput = await context.CallActivityAsync<CallLlmOutput>(
                     nameof(CallLlmActivity), llmInput);
+
+                // The first output tells the agent's replay setting. When earlier turns' reasoning is
+                // never sent back, stop carrying it in the inputs of the run's later calls.
+                if (iteration == 0 && llmOutput.ReasoningReplay is ReasoningReplay.WithinRun or ReasoningReplay.Off)
+                {
+                    StripReasoning(messages, 0, turnStartIndex);
+                }
 
                 if (llmOutput.Error is not null)
                 {
@@ -106,7 +119,7 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
                     {
                         Role = "assistant",
                         Content = llmOutput.Text,
-                        Reasoning = llmOutput.Reasoning
+                        Reasoning = KeptReasoning(llmOutput)
                     });
 
                     await NotifyAgentContextCompleteAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, errorMessage: null);
@@ -115,7 +128,7 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
                     {
                         Response = new AgentResponse(
                             WorkflowChatMessageConverter.CreateAssistantMessage(llmOutput.Text, llmOutput.Reasoning)),
-                        TurnMessages = messages.Skip(turnStartIndex).ToList()
+                        TurnMessages = ToTurnMessages(messages, turnStartIndex, llmOutput.ReasoningReplay)
                     };
                 }
 
@@ -127,8 +140,9 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
                     FunctionCalls = llmOutput.FunctionCalls,
                     // Kept so the next iteration sends it back: providers such as Anthropic require the
                     // reasoning that preceded a tool call to accompany its result.
-                    Reasoning = llmOutput.Reasoning
+                    Reasoning = KeptReasoning(llmOutput)
                 });
+                lastReplay = llmOutput.ReasoningReplay;
 
                 // Activity: Execute each tool call as a separate activity.
                 var toolResults = new List<ExecuteToolOutput>();
@@ -166,13 +180,51 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
             return new AgentRunResult
             {
                 Response = maxIterationResponse,
-                TurnMessages = messages.Skip(turnStartIndex).ToList()
+                TurnMessages = ToTurnMessages(messages, turnStartIndex, lastReplay)
             };
         }
         catch (Exception ex)
         {
             await NotifyAgentContextCompleteAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, errorMessage: ex.Message);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// The reasoning to keep on the assistant message: none when the agent's replay setting is
+    /// <see cref="ReasoningReplay.Off"/>, so its messages do not grow with reasoning never sent back.
+    /// </summary>
+    private static List<WorkflowReasoningContent>? KeptReasoning(CallLlmOutput llmOutput) =>
+        llmOutput.ReasoningReplay == ReasoningReplay.Off ? null : llmOutput.Reasoning;
+
+    /// <summary>
+    /// The run's own messages returned as <see cref="AgentRunResult.TurnMessages"/>. With
+    /// <see cref="ReasoningReplay.WithinRun"/> or <see cref="ReasoningReplay.Off"/> they leave the
+    /// reasoning out, so the history passed to later turns does not grow with it.
+    /// </summary>
+    private static List<WorkflowChatMessage> ToTurnMessages(
+        List<WorkflowChatMessage> messages,
+        int turnStartIndex,
+        ReasoningReplay? replay)
+    {
+        var turnMessages = messages.Skip(turnStartIndex).ToList();
+        if (replay is ReasoningReplay.WithinRun or ReasoningReplay.Off)
+        {
+            StripReasoning(turnMessages, 0, turnMessages.Count);
+        }
+
+        return turnMessages;
+    }
+
+    /// <summary>Removes the reasoning from <paramref name="messages"/>[start..end).</summary>
+    private static void StripReasoning(List<WorkflowChatMessage> messages, int start, int end)
+    {
+        for (var i = start; i < end; i++)
+        {
+            if (messages[i].Reasoning is not null)
+            {
+                messages[i] = messages[i] with { Reasoning = null };
+            }
         }
     }
 

@@ -12,6 +12,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -95,6 +96,9 @@ public sealed class DaprFixture : IAsyncLifetime
     /// Records chat options.
     /// </summary>
     public ChatOptionsRecorder OptionsRecorder { get; } = new();
+
+    /// <summary>An agent with its own ChatOptions and a WithReasoning effort, recording what reaches its chat client.</summary>
+    public const string ReasoningOptionsProbeAgent = "ReasoningOptionsProbeAgent";
 
     /// <summary>
     /// The binary store component name used when <see cref="BinaryStorePayloads"/> is on.
@@ -256,6 +260,14 @@ public sealed class DaprFixture : IAsyncLifetime
                 .AsAIAgent(instructions: "Farewell agent", name: "FarewellAgent"))
             .WithAgent(_ => new TextResponseMockChatClient("options-probe-response", optionsRecorder)
                 .AsAIAgent(instructions: "Options probe agent", name: "OptionsProbeAgent"))
+            // --- Reasoning options probe: its own ChatOptions plus a WithReasoning effort (below) ---
+            .WithAgent(_ => new TextResponseMockChatClient("reasoning-probe-response", optionsRecorder)
+                .AsAIAgent(new ChatClientAgentOptions
+                {
+                    Name = ReasoningOptionsProbeAgent,
+                    ChatOptions = new ChatOptions { Instructions = "Reasoning options probe agent", Temperature = 0.4f }
+                }))
+            .WithReasoning(ReasoningOptionsProbeAgent, ReasoningEffort.High)
             // --- Keyed agents: different chat-client keys (mirrors KeyedAgentInvokerDemo) ---
             .WithAgent("chat-key-alpha",
                 _ => new TextResponseMockChatClient("Alpha response")

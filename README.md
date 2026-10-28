@@ -245,6 +245,62 @@ survive the workflow (rely on the Responses API's own conversation state for tho
 Clients that do not return reasoning are unaffected; the Dapr Conversation API does not carry
 it today.
 
+### Reasoning effort
+Ask a reasoning model for an effort level with `WithReasoning`, for every agent or for one. It is
+sent as `ChatOptions.Reasoning` on every LLM call:
+
+```csharp
+builder.Services.AddDaprAgents()
+    .WithAgent(/* ... */)
+    .WithReasoning(ReasoningEffort.Medium)                           // every agent
+    .WithReasoning("Planner", ReasoningEffort.High, ReasoningOutput.Full); // this agent only
+```
+
+An agent created with its own `ChatClientAgentOptions.ChatOptions` now keeps them on every LLM
+call; earlier versions used only their tools. That covers temperature, output limits, response
+format, tool mode, additional properties, reasoning and the rest, with these exceptions:
+
+- Tools, instructions and the conversation id are supplied by the run itself.
+- Background responses and continuation tokens apply only when a run's `AgentRunOptions` set them,
+  because the workflow does not poll a background response.
+- A required tool mode (`ChatToolMode.RequireAny` or `RequireSpecific`) applies to the run's first
+  LLM call only, as with `FunctionInvokingChatClient`; otherwise a model that obeys it would call
+  tools until the run hits its iteration limit.
+
+A run's `AgentRunOptions` override only what they set, so an agent's own response format also
+applies to `RunAgentAndDeserializeAsync<T>` unless the run passes one. With `DaprChatClient`, the
+tool mode is sent as the Conversation API's tool choice and additional properties as its metadata.
+
+The effort and the output are each taken from `WithReasoning(agentName, ...)`, else the agent's
+own `ChatOptions.Reasoning`, else `WithReasoning(...)` for every agent.
+
+Chat clients that do not support reasoning options ignore the effort. `DaprChatClient` is one of
+them, because the Dapr Conversation API has no field for it; an agent that sets an effort on it
+logs a warning once.
+
+### Sending reasoning back
+Sending reasoning back costs input tokens on every call, and keeping it makes the run's messages,
+and the workflow payloads that carry them, larger. `WithReasoningReplay` chooses how much, for
+every agent or for one:
+
+| `ReasoningReplay` | Sent back | Kept in `TurnMessages` |
+|---|---|---|
+| `AcrossTurns` (default) | on the run's later calls, and on later turns given the history | yes |
+| `WithinRun` | only on the later calls of the run that produced it, as a tool loop needs | no |
+| `Off` | never | no |
+
+With `WithinRun` and `Off`, reasoning in the history from earlier turns is also dropped from the
+run's later LLM call inputs. Use `WithinRun`, not `Off`, with providers that require the reasoning
+behind a tool call to accompany the tool result, such as Anthropic extended thinking.
+
+```csharp
+builder.Services.AddDaprAgents()
+    .WithAgent(/* ... */)
+    .WithReasoningReplay("Engineer", ReasoningReplay.WithinRun);
+```
+
+With every setting, the response returned to the caller still starts with the final reasoning.
+
 ## LLM call timeouts
 Each LLM call is bounded by a timeout, 100 seconds unless you change it. A slow model, such as one
 running locally, can need more. Set a default for every agent, override it per agent, or pass
