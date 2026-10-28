@@ -5,8 +5,10 @@
 using Dapr.Testcontainers.Common;
 using Dapr.Testcontainers.Common.Options;
 using Dapr.Testcontainers.Harnesses;
+using Dapr.StateManagement;
 using Dapr.Workflow;
 using Diagrid.AI.Microsoft.AgentFramework.Abstractions;
+using Diagrid.AI.Microsoft.AgentFramework.Conversations;
 using Diagrid.AI.Microsoft.AgentFramework.Hosting;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
@@ -97,6 +99,26 @@ public sealed class DaprFixture : IAsyncLifetime
     /// </summary>
     public ChatOptionsRecorder OptionsRecorder { get; } = new();
 
+    /// <summary>
+    /// The Redis state store component the harness writes; it also backs the conversation store.
+    /// </summary>
+    public const string StateStoreName = Dapr.Testcontainers.Constants.DaprComponentNames.StateManagementComponentName;
+
+    /// <summary>
+    /// The key prefix the test app's conversation store uses.
+    /// </summary>
+    public const string ConversationKeyPrefix = "it-conversation:";
+
+    /// <summary>
+    /// The test app's conversation store (<c>WithConversationStore</c>).
+    /// </summary>
+    public IConversationStore ConversationStore { get; private set; } = null!;
+
+    /// <summary>
+    /// The test app's Dapr state client, for checks against the state store itself.
+    /// </summary>
+    public DaprStateManagementClient StateClient { get; private set; } = null!;
+
     /// <summary>An agent with its own ChatOptions and a WithReasoning effort, recording what reaches its chat client.</summary>
     public const string ReasoningOptionsProbeAgent = "ReasoningOptionsProbeAgent";
 
@@ -177,6 +199,8 @@ public sealed class DaprFixture : IAsyncLifetime
         Invoker         = _app.Services.GetRequiredService<IDaprAgentInvoker>();
         WorkflowClient  = _app.Services.GetRequiredService<DaprWorkflowClient>();
         ContextAccessor = _app.Services.GetRequiredService<IDaprAgentContextAccessor>();
+        ConversationStore = _app.Services.GetRequiredService<IConversationStore>();
+        StateClient = _app.Services.GetRequiredService<DaprStateManagementClient>();
         Client  = new HttpClient
         {
             BaseAddress = new Uri($"http://localhost:{_harness.AppPort}"),
@@ -268,6 +292,8 @@ public sealed class DaprFixture : IAsyncLifetime
                     ChatOptions = new ChatOptions { Instructions = "Reasoning options probe agent", Temperature = 0.4f }
                 }))
             .WithReasoning(ReasoningOptionsProbeAgent, ReasoningEffort.High)
+            // --- Conversation store, in the workflow's own Redis state store ---
+            .WithConversationStore(StateStoreName, options => options.KeyPrefix = ConversationKeyPrefix)
             // --- Keyed agents: different chat-client keys (mirrors KeyedAgentInvokerDemo) ---
             .WithAgent("chat-key-alpha",
                 _ => new TextResponseMockChatClient("Alpha response")

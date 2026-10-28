@@ -169,6 +169,17 @@ Fields are snake_case and set explicitly through the source-generated context. E
 
 ### 1.5 `AppendTurnAsync`: the ambiguous-outcome flaw fixed
 
+> **Corrected in PR 3 (measured against daprd 1.19 + Redis):** Redis accepts a save conditioned on
+> any ETag when the key is missing, so "the ETag differs" holds only while the manifest exists. The
+> implementation therefore treats an absent manifest as "could still land", `DeleteAsync` writes a
+> tombstone instead of removing the key, and every manifest carries a random `incarnation`, which a
+> pinned load checks. A first-write conflict comes back as `Internal`, not `Aborted`. Kept chunks are
+> refreshed at half the TTL, or when the TTL changed. `contentType` metadata is deliberately not sent:
+> on a Redis with the RedisJSON module it switches Dapr to a different write script that stores a JSON
+> document, so behavior would depend on the server's modules, and the values are raw JSON either way.
+> The Dapr client drops per-item errors from a bulk read, so a key that comes back empty is read again
+> on its own, which throws if the store failed.
+
 **Deletion rule.** A chunk written by this call may be deleted only when both of these hold:
 - **(a)** the manifest just read does not reference it;
 - **(b)** the commit that would have referenced it can no longer land, because the manifest's current ETag differs from the ETag that commit was conditioned on. For a first write there was no ETag, so the condition is that the key now exists.

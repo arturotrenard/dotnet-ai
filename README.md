@@ -168,6 +168,52 @@ spec:
 > workflow cannot resolve them, so use it only for local testing. Register `WithBinaryStorePayloads`
 > in every app that hosts or schedules these workflows.
 
+## Conversation store
+`WithConversationStore` keeps conversation history, including the model's reasoning, in a Dapr state
+store, outside the workflow payloads:
+
+```csharp
+builder.Services.AddDaprAgents()
+    .WithAgent(/* ... */)
+    .WithConversationStore("statestore", options =>
+    {
+        options.TimeToLive = TimeSpan.FromDays(14); // optional, recommended
+    });
+```
+
+It registers `IConversationStore`, which loads a conversation's history and appends one run's
+messages to it as a turn:
+
+- **A turn is stored all at once or not at all.** Its messages are written first, then a small
+  manifest is committed with an ETag check, so a reader never sees half a turn.
+- **Appending the same turn id again changes nothing**, and returns `AlreadyAppended`. Retrying an
+  append after a timeout is therefore safe.
+- **Concurrent appends to one conversation are ordered by commit.** A turn produced without
+  seeing an earlier commit is still stored, and its result reports `BaseMoved`.
+- **`LoadAsync(id, upToSequence, incarnation)` returns a fixed prefix** that later appends do not
+  change. It throws `ConversationNotFoundException` if that prefix was deleted or expired, rather than
+  returning less, or another conversation created since under the same id.
+- **`DeleteAsync` leaves a small tombstone** at the conversation's key, so an append still in flight
+  cannot bring back history that was deleted. An append to the same id after that starts a new
+  conversation.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `KeyPrefix` | `agent-conversation:` | Prefix of every key, after the component's own key prefix (the app id by default) |
+| `TimeToLive` | none | A conversation expires this long after its last append |
+| `MaxChunkBytes` | 256 KiB | Size of each stored document of messages; keep it below the store's value limit |
+| `TurnDedupeWindow` | 128 | How many recent turn ids are remembered for idempotent appends |
+| `MaxCommitAttempts` | 10 | Commit attempts under contention before `ConversationStoreException` |
+
+The component must support ETags, and TTL if you set one; Redis, PostgreSQL and Cosmos DB, for
+example, support both. Keys are prefixed, so the workflow `statestore` works. Set the expiry with
+`TimeToLive`, not with `ttlInSeconds` on the component: a component-wide TTL would also expire stored
+messages that a conversation still references.
+
+> An append whose outcome cannot be confirmed (a lost reply) can leave unreferenced documents
+> behind. They are deleted once they provably cannot become part of the conversation; otherwise the
+> TTL removes them, so setting one is recommended.
+
 ## Model reasoning
 When the chat client returns the model's reasoning as `TextReasoningContent` (reasoning models
 such as OpenAI's Responses API, Anthropic extended thinking, or DeepSeek-style
