@@ -12,12 +12,17 @@
 
 using System.Diagnostics.CodeAnalysis;
 using Dapr.AI.Microsoft.Extensions;
+using Dapr.StateManagement;
 using Dapr.Workflow.Payloads;
 using Diagrid.AI.Microsoft.AgentFramework.Abstractions;
+using Diagrid.AI.Microsoft.AgentFramework.Conversations;
+using Diagrid.AI.Microsoft.AgentFramework.Conversations.Internal;
 using Diagrid.AI.Microsoft.AgentFramework.Runtime;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace Diagrid.AI.Microsoft.AgentFramework.Hosting;
 
@@ -302,6 +307,58 @@ public static class DaprAgentsBuilderExtensions
         ReasoningReplayRegistration.Validate(replay);
 
         GetServices(builder).AddSingleton(new ReasoningReplayRegistration(agentName, replay));
+
+        return builder;
+    }
+
+    // =========================================================================
+    // Conversation store
+    //
+    // History kept in a Dapr state store instead of workflow payloads, so a run started with a
+    // conversation id continues from the earlier turns, model reasoning included, without carrying
+    // them in every activity input. Port of dapr-agents DaprSessionStore.
+    // =========================================================================
+
+    /// <summary>
+    /// Keeps agent conversation history, including model reasoning, in a Dapr state store, so runs started
+    /// with a conversation id continue from the earlier turns without carrying them in workflow payloads.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="stateStoreName">
+    /// The Dapr state store component. It must support ETags, and also TTL when
+    /// <see cref="DaprConversationStoreOptions.TimeToLive"/> is set.
+    /// </param>
+    /// <param name="configure">Optional further settings, such as a TTL or the key prefix.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// <para>
+    /// Registers <see cref="IConversationStore"/> only when none is registered yet, so a store registered by the
+    /// host before this call is kept.
+    /// </para>
+    /// <para>
+    /// Keys start with <see cref="DaprConversationStoreOptions.KeyPrefix"/>, after the component's own key prefix
+    /// (the app id by default), so conversations are per app and can share the workflow state store. Setting
+    /// <see cref="DaprConversationStoreOptions.TimeToLive"/> is recommended: it also removes the rare documents
+    /// an append leaves behind when it cannot confirm whether its commit landed.
+    /// </para>
+    /// </remarks>
+    public static IAgentsBuilder WithConversationStore(
+        this IAgentsBuilder builder,
+        string stateStoreName,
+        Action<DaprConversationStoreOptions>? configure = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stateStoreName);
+
+        var options = new DaprConversationStoreOptions { StateStoreName = stateStoreName };
+        configure?.Invoke(options);
+        options.Validate();
+
+        GetServices(builder).TryAddSingleton<IConversationStore>(sp => new DaprConversationStore(
+            new DaprConversationStateBackend(sp.GetRequiredService<DaprStateManagementClient>(), options),
+            options,
+            sp.GetService<TimeProvider>() ?? TimeProvider.System,
+            sp.GetService<ILogger<DaprConversationStore>>()));
 
         return builder;
     }

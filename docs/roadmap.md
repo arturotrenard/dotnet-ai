@@ -226,7 +226,12 @@ Solo se cuenta una idea si está en el código de `dapr_agents/` en `main` (no u
 Actualizado el 2026-10-28: el razonamiento pasa adelante, porque es lo que necesita team_learning_agents.
 
 1. **#7:** el bug de `args` en Catalyst. ✅ PR #5 en el fork.
-2. **Historial de sesión durable con razonamiento** (PR 1, capturar y reenviar el razonamiento: PR #6 en el fork), estilo `DaprSessionStore` (ver "Cómo lo resuelve dapr-agents" en la Parte A), junto con #3 (aplicar las `ChatOptions` del agente, incluido `Reasoning`) y `WithReasoning`.
+2. **Historial de sesión durable con razonamiento**, estilo `DaprSessionStore` (ver "Cómo lo resuelve dapr-agents" en la Parte A). Plan en `docs/conversation-store-design.md` §6:
+   - PR 1, capturar y reenviar el razonamiento. ✅ PR #6 en el fork.
+   - PR 2, aplicar las `ChatOptions` del agente (#3), `WithReasoning` y `WithReasoningReplay`. ✅ PR #7 en el fork.
+   - PR 3, el store (`WithConversationStore`, `IConversationStore`), todavía sin conectar a los runs. En curso.
+   - PR 4, correr agentes contra una conversación guardada (`RunAgentInConversationAsync`, `AttachConversation`).
+   - PR 5, `SessionWorkflow` respaldado por el store.
 3. Cliente directo a Ollama en team_learning_agents y bake-off de esfuerzo.
 4. **#1:** reintentos durables.
 5. **#2:** `MaxIterations` configurable y la señal de agotamiento.
@@ -240,6 +245,7 @@ Cada punto va primero al fork (`dev`) y después, si aplica, a upstream desde un
 
 - Que Ollama Cloud corra el mismo código de compatibilidad OpenAI que Ollama open source. Solo las pruebas en vivo de arriba están verificadas.
 - Si el esfuerzo de verdad cambia la profundidad o la calidad del razonamiento en glm-5.3.
+- ~~Si guardar con first-write y sin ETag solo crea la clave (§8.1 del diseño).~~ Medido contra daprd 1.19 y Redis en el PR 3: solo crea, pero Redis reporta el conflicto como `Internal`, no `Aborted`.
 - Que OllamaSharp 5.5.0 traiga el mapeo de `Reasoning`, y que `ollama.com/api/chat` acepte la key con bearer.
 - Si los mantenedores de dapr/dapr exigen una propuesta formal para cambiar el proto.
-- Una observación sin confirmar: la sobrecarga en `DaprAgentsBuilderExtensions.cs:297-318` parece saltarse `RegisterAgentComponents`. Hace falta un test.
+- ~~La sobrecarga de `WithAgent` con fábrica nombrada se saltaba `RegisterAgentComponents`.~~ Confirmado y corregido en el PR #7, con test.
