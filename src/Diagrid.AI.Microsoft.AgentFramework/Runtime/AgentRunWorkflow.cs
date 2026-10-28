@@ -27,7 +27,8 @@ namespace Diagrid.AI.Microsoft.AgentFramework.Runtime;
 ///   <item>Call the LLM as an activity (<see cref="CallLlmActivity"/>)</item>
 ///   <item>If the LLM returns tool calls, execute each tool as a separate activity (<see cref="ExecuteToolActivity"/>)</item>
 ///   <item>Feed tool results back and loop until the LLM returns a final response</item>
-///   <item>With a stored conversation, commit the run's messages to it as one turn (<see cref="AppendConversationTurnActivity"/>)</item>
+///   <item>With a stored conversation, commit the run's messages to it as one turn (<see cref="AppendConversationTurnActivity"/>),
+///   then compact it if the first LLM call found it past the agent's trigger (<see cref="CompactConversationActivity"/>)</item>
 ///   <item>Notify the agent's <c>AIContextProviders</c> that the run has completed (<see cref="CompleteAgentContextActivity"/>)</item>
 /// </list>
 /// Without a conversation id the activity sequence is exactly what it was before conversations existed, so
@@ -109,6 +110,7 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
         // The stored history the run's first LLM call saw; every later call loads exactly the same prefix.
         long? historySequence = null;
         string? historyIncarnation = null;
+        var compactionDue = false;
 
         try
         {
@@ -138,6 +140,7 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
                 {
                     historySequence = llmOutput.HistorySequence ?? 0;
                     historyIncarnation = llmOutput.HistoryIncarnation;
+                    compactionDue = llmOutput.CompactionDue == true;
                 }
 
                 // The first output tells the agent's replay setting. When earlier turns' reasoning is
@@ -166,6 +169,7 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
 
                     var finalTurnMessages = ToTurnMessages(messages, turnStartIndex, llmOutput.ReasoningReplay);
                     var finalCommit = await CommitTurnAsync(context, input, turnId, historySequence, historyIncarnation, finalTurnMessages);
+                    await CompactIfDueAsync(context, input, turnId, compactionDue, finalCommit, historyIncarnation);
 
                     await NotifyAgentContextCompleteAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, errorMessage: null);
 
@@ -227,6 +231,7 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
             // "stop now" rely on exactly this, so the store keeps it too.
             var turnMessages = ToTurnMessages(messages, turnStartIndex, lastReplay);
             var commit = await CommitTurnAsync(context, input, turnId, historySequence, historyIncarnation, turnMessages);
+            await CompactIfDueAsync(context, input, turnId, compactionDue, commit, historyIncarnation);
 
             await NotifyAgentContextCompleteAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, errorMessage: null);
 
@@ -277,6 +282,30 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
                 BaseIncarnation = historyIncarnation
             },
             CommitOptions);
+    }
+
+    /// <summary>
+    /// Compacts the stored conversation after the commit when the run's first LLM call found it past the agent's
+    /// trigger. Scheduled only then, so runs without compaction keep their activity sequence. The activity never
+    /// throws: a failed compaction leaves the run successful and the next run tries again.
+    /// </summary>
+    private static async Task CompactIfDueAsync(
+        WorkflowContext context,
+        DaprAgentInvocation input,
+        string? turnId,
+        bool compactionDue,
+        ConversationAppendResult? commit,
+        string? historyIncarnation)
+    {
+        if (!compactionDue || commit is null || input.ConversationId is null || turnId is null)
+        {
+            return;
+        }
+
+        await context.CallActivityAsync<CompactConversationOutput>(
+            nameof(CompactConversationActivity),
+            new CompactConversationInput(input.ConversationId, $"{turnId}:summary", input.AgentName, input.ChatClientKey,
+                historyIncarnation));
     }
 
     /// <summary>

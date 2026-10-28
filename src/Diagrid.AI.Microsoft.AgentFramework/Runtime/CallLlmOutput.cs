@@ -52,4 +52,11 @@ internal sealed record CallLlmOutput
     /// or there was none.
     /// </summary>
     public string? HistoryIncarnation { get; init; }
+
+    /// <summary>
+    /// <see langword="true"/> when the stored history the call loaded has grown past the agent's compaction
+    /// trigger (<c>WithConversationCompaction</c>), so the run compacts the conversation after its commit.
+    /// <see langword="null"/> otherwise.
+    /// </summary>
+    public bool? CompactionDue { get; init; }
 }

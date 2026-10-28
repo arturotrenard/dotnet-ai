@@ -549,6 +549,12 @@ public sealed class ConversationRunTests
             return Task.FromResult(new ConversationAppendResult(ConversationAppendStatus.Appended, 0, turn.Messages.Count, false));
         }
 
+        public Task<ConversationAppendResult> AppendSummaryAsync(ConversationSummary summary, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<ConversationEntry>> LoadEntriesAsync(string conversationId, long fromSequence, long? toSequence = null,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
         public Task<bool> DeleteAsync(string conversationId, CancellationToken cancellationToken = default) => Task.FromResult(true);
     }
 }

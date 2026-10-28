@@ -162,3 +162,23 @@ internal sealed class ConcurrentConversationOrchestrationWorkflow : Workflow<str
         return string.Join(";", results.Select(r => $"{r.ConversationSequence},{r.ConversationBaseMoved}"));
     }
 }
+
+/// <summary>
+/// Runs <see cref="CompactionMockChatClient"/> for three turns against the stored conversation named by the input.
+/// The agent compacts after a run whose loaded history is past its small trigger.
+/// </summary>
+internal sealed class CompactingConversationOrchestrationWorkflow : Workflow<string, string>
+{
+    public override async Task<string> RunAsync(WorkflowContext context, string conversationId)
+    {
+        var agent = context.GetAgent(CompactionMockChatClient.AgentName);
+        var padding = new string('.', 200);
+
+        for (var i = 1; i <= 3; i++)
+        {
+            await context.RunAgentInConversationAsync(agent, conversationId, $"{conversationId} turn {i} {padding}");
+        }
+
+        return "done";
+    }
+}

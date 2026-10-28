@@ -117,4 +117,29 @@ public sealed class ConversationRunTests(DaprFixture fixture)
         Assert.Equal(stored.Entries[2].TurnId, stored.Entries[3].TurnId);
         Assert.NotEqual(stored.Entries[0].TurnId, stored.Entries[2].TurnId);
     }
+
+    [Fact]
+    public async Task Compaction_SummarizesOlderTurns_AndTheNextRunGetsTheSummary()
+    {
+        var conversationId = NewId("conversation-compaction");
+
+        var instanceId = await fixture.WorkflowClient.ScheduleNewWorkflowAsync(
+            name:  nameof(CompactingConversationOrchestrationWorkflow),
+            input: conversationId);
+        var state = await fixture.WorkflowClient.WaitForWorkflowCompletionAsync(instanceId);
+        Assert.Equal(WorkflowRuntimeStatus.Completed, state.RuntimeStatus);
+
+        // Turn 2 loaded turn 1 (past the trigger), so turn 1 was summarized after it; turn 3 loaded the summary
+        // and turn 2, and then turn 2 was summarized too.
+        var stored = await fixture.ConversationStore.LoadAsync(conversationId, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.NotNull(stored.Entries[0].SummaryOf);
+        Assert.EndsWith(CompactionMockChatClient.Summary, stored.Entries[0].Message.Content);
+        Assert.Equal(["system", "user", "assistant"], stored.Entries.Select(e => e.Message.Role));
+        Assert.Contains("turn 3", stored.Entries[1].Message.Content);
+
+        var turn3Call = CompactionMockChatClient.Requests.Single(r => r[^1].Contains($"{conversationId} turn 3", StringComparison.Ordinal));
+        Assert.Contains(turn3Call, m => m.StartsWith("system: ", StringComparison.Ordinal) && m.EndsWith(CompactionMockChatClient.Summary, StringComparison.Ordinal));
+        Assert.DoesNotContain(turn3Call, m => m.Contains($"{conversationId} turn 1", StringComparison.Ordinal));
+        Assert.Contains(turn3Call, m => m.Contains($"{conversationId} turn 2", StringComparison.Ordinal));
+    }
 }
