@@ -234,7 +234,7 @@ Actualizado el 2026-10-28. Cada punto va primero al fork (`dev`) y después, si 
 - [x] PR 4, runs contra una conversación guardada (`RunAgentInConversationAsync`, `AttachConversation`) (fork #9, llevado a `dev` con #12).
 - [x] PR 5, sesiones respaldadas por el store (`CreateStoredSessionAsync`) (fork #10, idem).
 - [x] PR 6, tope de contexto (`WithContextWindow`) y compactación persistida (`WithConversationCompaction`) (fork #11, idem). dapr-agents no tiene ninguna de las dos.
-- [ ] Mergear el fork #13: registrar el `DaprConversationClient` sin clave aunque el host tenga uno keyed (hallazgo de Copilot en upstream #99).
+- [x] Fork #13: registrar el `DaprConversationClient` sin clave aunque el host tenga uno keyed (hallazgo de Copilot en upstream #99).
 
 ### Upstream (`diagridio/dotnet-ai`), un PR por funcionalidad
 
