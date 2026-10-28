@@ -121,12 +121,35 @@ Saltarse el sidecar hace perder el YAML del componente, la key vía secret store
    - Después dotnet-sdk (`ConversationOptions.ReasoningEffort`, `ResultMessage.Reasoning`, mapeo en `DaprChatClient`), y por último `DaprConversationChatClient` en la app.
    - `dapr run --runtime-path` sirve solo para los ejemplos. Aspire AppHost y Testcontainers necesitan su propio override.
 
-### Decisiones pendientes
+### Decisiones (2026-10-28)
 
-1. ¿Se acepta que algunos agentes salteen el sidecar mientras medimos?
-2. ¿Los cambios en Dapr dependen del resultado del bake-off, o son un objetivo en sí mismo?
-3. ¿El razonamiento se reenvía al modelo entre turnos? La propuesta es reenviarlo siempre dentro del loop de tools y solo con opt-in entre turnos.
-4. ¿Se guarda `ProtectedData`? Ollama no lo usa; Responses y Anthropic sí.
+1. **Tomada:** los agentes que necesiten razonamiento pueden saltarse el sidecar con un cliente directo mientras Dapr no lo soporte.
+2. **Tomada:** el razonamiento **se reenvía al modelo entre turnos**, no solo dentro del loop de tools. El objetivo es que cada request siga desde lo ya razonado y no empiece de cero. Esto reemplaza el "opt-in entre turnos" del plan de arriba.
+3. **Tomada:** el historial de la conversación, razonamiento incluido, **se guarda fuera del historial del workflow**, en un store de sesiones estilo `DaprSessionStore` de dapr-agents (ver abajo). Esto reemplaza "adjuntarlo a `TurnMessages`" y resuelve el crecimiento cuadrático.
+4. Pendiente: ¿los cambios en Dapr dependen del resultado del bake-off, o son un objetivo en sí mismo?
+5. Pendiente: ¿se guarda `ProtectedData`? Ollama no lo usa; Responses y Anthropic sí. Mientras tanto se guarda, porque el store no tiene el problema de tamaño de los payloads del workflow.
+
+### Cómo lo resuelve dapr-agents, y el diseño que adoptamos
+
+dapr-agents tiene el mismo problema por el camino de Dapr Conversation (solo lee `reasoning_tokens`, `llm/dapr/client.py:287`). Sus clientes directos tampoco conservan el razonamiento: OpenAI lo descarta, y Anthropic guarda el *thinking* en `metadata['raw_content']` (`llm/anthropic/utils.py:430-523`), pero nada lo vuelve a leer. El `DurableAgent` no tiene opción de esfuerzo; solo pasa `messages`, `tools`, `response_format` y `tool_choice` (`agents/durable.py:2345-2355`).
+
+Su solución para no empezar de cero es el **executor de Claude Agent SDK** (#809, 2026-10-01; último fix #902, 2026-10-27). Le delega el loop completo al SDK y guarda la **transcripción nativa de la sesión, thinking incluido, en un state store de Dapr** con `DaprSessionStore` (`agents/executors/dapr_session_store.py`). La sesión se retoma con el `session_id` en cualquier pod o en una activity reintentada. Formato:
+
+- un **manifest** por sesión, en `{prefix}{session key}`, con la lista ordenada de IDs de chunks, una ventana acotada de IDs de entradas recientes (para appends idempotentes) y la fecha de modificación;
+- **chunks inmutables** en `{manifest key}#{chunk id}`, de tamaño acotado (`max_chunk_bytes`); una entrada demasiado grande va en un chunk propio;
+- el append escribe primero los chunks nuevos y después confirma el manifest **con ETag** (gana el primero). Quien pierde la carrera reintenta sobre el manifest nuevo y borra sus chunks huérfanos. Si el guardado llegó pero se perdió la respuesta, se comprueba contra el manifest guardado antes de borrar nada;
+- mientras el último chunk ocupe menos de la mitad de `max_chunk_bytes`, el siguiente append lo reescribe junto con las entradas nuevas, así la cantidad de chunks crece con el tamaño y no con la cantidad de appends;
+- **TTL** opcional: el manifest vence `ttl` después del último append, y los chunks se escriben con el doble para que siempre sobrevivan al manifest.
+
+Solo funciona con Claude, así que para Ollama/glm-5.3 seguimos necesitando nuestra parte. Lo que adoptamos en dotnet-ai:
+
+1. Un store de sesiones de conversación sobre `DaprStateManagementClient`, con el mismo formato de manifest, chunks, ETag, idempotencia y TTL. El workflow solo lleva el ID de la sesión.
+2. Las activities cargan el historial del store antes de llamar al LLM y le agregan cada turno, con el razonamiento como `TextReasoningContent` (texto y `ProtectedData`). Las claves de idempotencia salen del ID de la instancia del workflow y del número de turno, así un reintento o un replay no duplica entradas.
+3. `CallLlmActivity` captura el razonamiento de la respuesta y lo reenvía al modelo en los turnos siguientes.
+4. `WithReasoning(...)` por agente, y aplicar las `ChatOptions` del agente (#3).
+5. En team_learning_agents, un cliente directo a Ollama que mande `reasoning_effort` y convierta `message.reasoning` en `TextReasoningContent`.
+
+Precedente upstream para defenderlo: dapr-agents ya persiste las transcripciones de sesión en un state store de Dapr con este formato. Encaja también con la idea #23 de la Parte B (memoria durable en un state store).
 
 ---
 
@@ -198,12 +221,14 @@ Solo se cuenta una idea si está en el código de `dapr_agents/` en `main` (no u
 
 ## Orden de trabajo propuesto
 
-1. **#7:** el bug de `args` en Catalyst. Es una línea más un test golden.
-2. **#1:** reintentos durables. Deja lista la base de "resolver en `ResolveAgentContextActivity`".
-3. **#2:** `MaxIterations` configurable y la señal de agotamiento.
-4. **#3:** aplicar las `ChatOptions` del agente, incluido `Reasoning`.
-5. **#4:** uso de tokens y `FinishReason`.
-6. Parte A, paso 1: bake-off de esfuerzo en team_learning_agents.
+Actualizado el 2026-10-28: el razonamiento pasa adelante, porque es lo que necesita team_learning_agents.
+
+1. **#7:** el bug de `args` en Catalyst. ✅ PR #5 en el fork.
+2. **Historial de sesión durable con razonamiento**, estilo `DaprSessionStore` (ver "Cómo lo resuelve dapr-agents" en la Parte A), junto con #3 (aplicar las `ChatOptions` del agente, incluido `Reasoning`) y `WithReasoning`.
+3. Cliente directo a Ollama en team_learning_agents y bake-off de esfuerzo.
+4. **#1:** reintentos durables.
+5. **#2:** `MaxIterations` configurable y la señal de agotamiento.
+6. **#4:** uso de tokens y `FinishReason`.
 7. **#5:** versionado de workflows, antes de #9, #11 o #12.
 8. Lo demás según los resultados y lo que vaya entrando upstream.
 
