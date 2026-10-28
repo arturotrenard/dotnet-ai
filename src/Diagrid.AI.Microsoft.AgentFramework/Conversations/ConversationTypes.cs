@@ -27,7 +27,8 @@ namespace Diagrid.AI.Microsoft.AgentFramework.Conversations;
 /// <param name="Messages">The run's messages in order, starting with the user message.</param>
 /// <param name="BaseIncarnation">
 /// The <see cref="ConversationSnapshot.Incarnation"/> of the history the run was produced against, or
-/// <see langword="null"/> when it was empty. A different incarnation also counts as a moved base.
+/// <see langword="null"/> when it was empty. When set, the append fails with
+/// <see cref="ConversationNotFoundException"/> if that conversation was deleted or expired since.
 /// </param>
 public sealed record ConversationTurn(
     string ConversationId,
@@ -89,7 +90,7 @@ public enum ConversationAppendStatus
 /// <param name="NextSequence">The conversation's next sequence right after the turn was committed.</param>
 /// <param name="BaseMoved">
 /// <see langword="true"/> when other turns were committed after <see cref="ConversationTurn.BaseSequence"/>,
-/// or the conversation was created again, so the turn was produced without seeing them.
+/// so the turn was produced without seeing them.
 /// </param>
 public sealed record ConversationAppendResult(
     ConversationAppendStatus Status,

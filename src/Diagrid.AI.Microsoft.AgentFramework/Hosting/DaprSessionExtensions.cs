@@ -78,6 +78,40 @@ public static class DaprSessionExtensions
 		return null;
 	}
 	
+	/// <summary>
+	/// Creates a session bound to a stored conversation. Each agent run with it sees every turn already committed
+	/// to the conversation, including model reasoning, and appends its own turn when it succeeds. Nothing is
+	/// created up front: the conversation starts with its first turn.
+	/// </summary>
+	/// <param name="invoker">The agent invoker.</param>
+	/// <param name="conversationId">The conversation id, chosen by the caller.</param>
+	/// <returns>An <see cref="AgentSession"/> that continues the conversation.</returns>
+	/// <remarks>
+	/// Requires <c>WithConversationStore(...)</c>. Unlike <see cref="CreateSessionAsync"/>, no session workflow
+	/// orders the turns: runs that overlap are ordered by commit.
+	/// </remarks>
+	public static AgentSession AttachConversation(this IDaprAgentInvoker invoker, string conversationId)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);
+
+		var session = new DaprSession();
+		session.StateBag.SetValue(DaprSessionConstants.ConversationIdKey, conversationId);
+		return session;
+	}
+
+	/// <summary>
+	/// Extracts the stored conversation id from an <see cref="AgentSession"/>, if present.
+	/// </summary>
+	/// <param name="session">The agent session to extract the value from.</param>
+	/// <returns>The conversation id, if present; otherwise null.</returns>
+	public static string? GetConversationId(this AgentSession? session)
+	{
+		if (session?.StateBag.TryGetValue<string>(DaprSessionConstants.ConversationIdKey, out var value) == true && value is { } id)
+			return id;
+
+		return null;
+	}
+
 	private static AgentSession CreateSessionFromInstanceId(string instanceId)
 	{
 		var session = new DaprSession();

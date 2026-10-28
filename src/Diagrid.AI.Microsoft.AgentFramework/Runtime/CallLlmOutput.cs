@@ -40,4 +40,16 @@ internal sealed record CallLlmOutput
     /// <see cref="Abstractions.ReasoningReplay.AcrossTurns"/>.
     /// </summary>
     public Abstractions.ReasoningReplay? ReasoningReplay { get; init; }
+
+    /// <summary>
+    /// How many stored conversation entries the call loaded, or <see langword="null"/> without a conversation.
+    /// The run pins its history to the value its first call recorded.
+    /// </summary>
+    public long? HistorySequence { get; init; }
+
+    /// <summary>
+    /// The incarnation of the stored conversation the call loaded, or <see langword="null"/> when it was empty
+    /// or there was none.
+    /// </summary>
+    public string? HistoryIncarnation { get; init; }
 }

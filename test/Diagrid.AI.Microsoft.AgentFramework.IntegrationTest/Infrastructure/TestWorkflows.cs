@@ -83,3 +83,82 @@ internal sealed class ReasoningHistoryOrchestrationWorkflow : Workflow<string, s
         return $"{first.Response.Text}|{second.Response.Text}|{string.Join(",", finalReasoning)}";
     }
 }
+
+/// <summary>
+/// Runs <see cref="ReasoningMockChatClient"/> twice against the stored conversation named by the input, with
+/// <see cref="WorkflowContextExtensions.RunAgentInConversationAsync"/>, so turn 2 gets turn 1 from the store.
+/// </summary>
+internal sealed class ConversationReasoningOrchestrationWorkflow : Workflow<string, string>
+{
+    public override async Task<string> RunAsync(WorkflowContext context, string conversationId)
+    {
+        var agent = context.GetAgent(ReasoningMockChatClient.AgentName);
+
+        var first = await context.RunAgentInConversationAsync(agent, conversationId, "turn 1");
+        var second = await context.RunAgentInConversationAsync(agent, conversationId, "turn 2");
+
+        var finalReasoning = second.Response.Messages
+            .SelectMany(m => m.Contents)
+            .OfType<TextReasoningContent>()
+            .Select(r => $"{r.Text}/{r.ProtectedData}");
+
+        return $"{first.Response.Text}|{second.Response.Text}|{string.Join(",", finalReasoning)}|{first.ConversationSequence},{second.ConversationSequence}";
+    }
+}
+
+/// <summary>
+/// Runs <see cref="FailOnceChatClient"/> against a stored conversation: the first attempt fails after its tool
+/// call, and the retry with the same conversation id succeeds.
+/// </summary>
+internal sealed class ConversationRetryOrchestrationWorkflow : Workflow<string, string>
+{
+    public override async Task<string> RunAsync(WorkflowContext context, string conversationId)
+    {
+        var agent = context.GetAgent(FailOnceChatClient.AgentName);
+        var message = $"{FailOnceChatClient.Marker} {conversationId}";
+
+        var failed = false;
+        try
+        {
+            await context.RunAgentInConversationAsync(agent, conversationId, message);
+        }
+        catch (Exception)
+        {
+            failed = true;
+        }
+
+        var retry = await context.RunAgentInConversationAsync(agent, conversationId, message);
+        return $"{failed}|{retry.ConversationSequence}|{retry.Response.Text}";
+    }
+}
+
+/// <summary>
+/// Runs EchoAgent against a stored conversation, then deletes it twice with
+/// <see cref="WorkflowContextExtensions.DeleteConversationAsync"/>.
+/// </summary>
+internal sealed class DeleteConversationOrchestrationWorkflow : Workflow<string, string>
+{
+    public override async Task<string> RunAsync(WorkflowContext context, string conversationId)
+    {
+        await context.RunAgentInConversationAsync(context.GetAgent("EchoAgent"), conversationId, "hello");
+        var deleted = await context.DeleteConversationAsync(conversationId);
+        var deletedAgain = await context.DeleteConversationAsync(conversationId);
+        return $"{deleted}|{deletedAgain}";
+    }
+}
+
+/// <summary>
+/// Runs EchoAgent twice at once against the stored conversation named by the input.
+/// </summary>
+internal sealed class ConcurrentConversationOrchestrationWorkflow : Workflow<string, string>
+{
+    public override async Task<string> RunAsync(WorkflowContext context, string conversationId)
+    {
+        var agent = context.GetAgent("EchoAgent");
+        var results = await Task.WhenAll(
+            context.RunAgentInConversationAsync(agent, conversationId, "first"),
+            context.RunAgentInConversationAsync(agent, conversationId, "second"));
+
+        return string.Join(";", results.Select(r => $"{r.ConversationSequence},{r.ConversationBaseMoved}"));
+    }
+}

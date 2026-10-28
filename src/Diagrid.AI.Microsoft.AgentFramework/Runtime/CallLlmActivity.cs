@@ -13,6 +13,7 @@
 using System.Text.Json;
 using Dapr.Workflow;
 using Diagrid.AI.Microsoft.AgentFramework.Abstractions;
+using Diagrid.AI.Microsoft.AgentFramework.Conversations;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
@@ -29,6 +30,8 @@ namespace Diagrid.AI.Microsoft.AgentFramework.Runtime;
 /// (<see cref="CallLlmInput.AdditionalInstructions"/>, <see cref="CallLlmInput.AdditionalMessages"/>,
 /// <see cref="CallLlmInput.AdditionalToolNames"/>) so that context providers — e.g. an MAF
 /// <c>AgentSkillsProvider</c> — stay in effect for every LLM call within a single agent run.
+/// When the run continues a stored conversation (<see cref="CallLlmInput.ConversationId"/>), its history is
+/// loaded from the <see cref="IConversationStore"/> on every call, pinned to the prefix the run's first call saw.
 /// </remarks>
 internal sealed partial class CallLlmActivity(
     ChatClientRegistry chatClientRegistry,
@@ -38,7 +41,8 @@ internal sealed partial class CallLlmActivity(
     ILogger<CallLlmActivity> logger,
     IEnumerable<LlmTimeoutRegistration>? llmTimeouts = null,
     IEnumerable<ReasoningEffortRegistration>? reasoningEfforts = null,
-    IEnumerable<ReasoningReplayRegistration>? reasoningReplays = null) : WorkflowActivity<CallLlmInput, CallLlmOutput>
+    IEnumerable<ReasoningReplayRegistration>? reasoningReplays = null,
+    IConversationStore? conversationStore = null) : WorkflowActivity<CallLlmInput, CallLlmOutput>
 {
 
     /// <inheritdoc />
@@ -63,7 +67,17 @@ internal sealed partial class CallLlmActivity(
                     "with explicit instructions and tools via the DaprAgentsBuilderExtensions overloads.");
         }
 
-        LogLlmCallInfo(input.AgentName, input.Messages.Count);
+        // Stored history goes where PriorMessages would: before the run's own messages.
+        var history = await LoadHistoryAsync(input).ConfigureAwait(false);
+        var runMessages = input.Messages;
+        var runMessagesStart = input.RunMessagesStart ?? 0;
+        if (history is { Entries.Count: > 0 })
+        {
+            runMessages = [.. history.Entries.Select(e => e.Message), .. input.Messages];
+            runMessagesStart += history.Entries.Count;
+        }
+
+        LogLlmCallInfo(input.AgentName, runMessages.Count);
 
         var timeout = LlmTimeoutRegistration.Resolve(llmTimeouts ?? [], input.AgentName);
         using var timeoutCts = new CancellationTokenSource();
@@ -77,7 +91,7 @@ internal sealed partial class CallLlmActivity(
             var reasoningSource = WorkflowChatMessageConverter.GetReasoningSource(input.AgentName, input.ChatClientKey);
             var replay = ReasoningReplayRegistration.Resolve(reasoningReplays ?? [], input.AgentName);
             var messages = BuildChatMessages(config.Instructions, input.AdditionalInstructions, input.AdditionalMessages,
-                input.Messages, reasoningSource, replay, input.RunMessagesStart ?? 0);
+                runMessages, reasoningSource, replay, runMessagesStart);
             var additionalTools = ResolveAdditionalTools(input.AgentName, input.AdditionalToolNames);
             var reasoning = ReasoningEffortRegistration.Resolve(reasoningEfforts ?? [], input.AgentName, config.BaseOptions?.Reasoning);
             WarnIfEffortIgnored(input.AgentName, config.ChatClient, reasoning);
@@ -87,7 +101,12 @@ internal sealed partial class CallLlmActivity(
             var response = await config.ChatClient.GetResponseAsync(messages, options, timeoutCts.Token)
                 .ConfigureAwait(false);
 
-            return ParseResponse(response, reasoningSource) with { ReasoningReplay = replay };
+            return ParseResponse(response, reasoningSource) with
+            {
+                ReasoningReplay = replay,
+                HistorySequence = history?.NextSequence,
+                HistoryIncarnation = history?.Incarnation
+            };
         }
         // A cancelled gRPC call surfaces as RpcException(Cancelled), not OperationCanceledException,
         // so the token's own state is what tells a timeout apart from any other failure.
@@ -103,6 +122,23 @@ internal sealed partial class CallLlmActivity(
             LogLlmCallError(input.AgentName, ex.Message);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Loads the run's stored conversation history, or returns <see langword="null"/> when the run has none.
+    /// Reasoning in it is sent back only to the agent and chat client that produced it, through each block's
+    /// source, as for <see cref="CallLlmInput.Messages"/>.
+    /// </summary>
+    private async Task<ConversationSnapshot?> LoadHistoryAsync(CallLlmInput input)
+    {
+        if (input.ConversationId is null)
+        {
+            return null;
+        }
+
+        var store = ConversationStoreGuard.Require(conversationStore, input.ConversationId);
+        return await store.LoadAsync(input.ConversationId, input.HistoryUpToSequence, input.HistoryIncarnation)
+            .ConfigureAwait(false);
     }
 
     private static List<ChatMessage> BuildChatMessages(

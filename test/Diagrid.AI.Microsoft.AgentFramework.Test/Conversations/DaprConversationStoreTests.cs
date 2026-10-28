@@ -914,20 +914,38 @@ public sealed class DaprConversationStoreTests
             ConversationId, 3, current.Incarnation, TestContext.Current.CancellationToken)).Entries.Count);
     }
 
-    [Fact]
-    public async Task Append_AgainstAnOlderIncarnation_ReportsBaseMoved()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Append_ProducedFromHistoryThatWasDeleted_IsNotStored(bool recreated)
     {
         var store = CreateStore();
         await store.AppendTurnAsync(Turn("t1", 0, User("a")), TestContext.Current.CancellationToken);
         var old = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
         await store.DeleteAsync(ConversationId, TestContext.Current.CancellationToken);
-        await store.AppendTurnAsync(Turn("t2", 0, User("b")), TestContext.Current.CancellationToken);
+        if (recreated)
+        {
+            await store.AppendTurnAsync(Turn("t2", 0, User("b")), TestContext.Current.CancellationToken);
+        }
+
+        var before = _backend.Keys.Order().ToList();
+        await Assert.ThrowsAsync<ConversationNotFoundException>(() => store.AppendTurnAsync(
+            Turn("t3", 1, User("c")) with { BaseIncarnation = old.Incarnation }, TestContext.Current.CancellationToken));
+
+        Assert.Equal(before, _backend.Keys.Order().ToList());
+    }
+
+    [Fact]
+    public async Task Append_WithTheCurrentIncarnation_IsStored()
+    {
+        var store = CreateStore();
+        await store.AppendTurnAsync(Turn("t1", 0, User("a")), TestContext.Current.CancellationToken);
+        var current = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
 
         var result = await store.AppendTurnAsync(
-            Turn("t3", 1, User("c")) with { BaseIncarnation = old.Incarnation }, TestContext.Current.CancellationToken);
+            Turn("t2", 1, User("b")) with { BaseIncarnation = current.Incarnation }, TestContext.Current.CancellationToken);
 
-        Assert.Equal(1, result.FirstSequence);
-        Assert.True(result.BaseMoved);
+        Assert.Equal(new ConversationAppendResult(ConversationAppendStatus.Appended, 1, 2, false), result);
     }
 
     [Fact]

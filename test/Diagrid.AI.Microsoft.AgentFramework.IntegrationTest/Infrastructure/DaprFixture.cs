@@ -268,6 +268,10 @@ public sealed class DaprFixture : IAsyncLifetime
                     reg.RegisterWorkflow<EchoOrchestrationWorkflow>();
                     reg.RegisterWorkflow<DetachedEchoOrchestrationWorkflow>();
                     reg.RegisterWorkflow<ReasoningHistoryOrchestrationWorkflow>();
+                    reg.RegisterWorkflow<ConversationReasoningOrchestrationWorkflow>();
+                    reg.RegisterWorkflow<ConversationRetryOrchestrationWorkflow>();
+                    reg.RegisterWorkflow<DeleteConversationOrchestrationWorkflow>();
+                    reg.RegisterWorkflow<ConcurrentConversationOrchestrationWorkflow>();
                     reg.RegisterWorkflow<CapitalOrchestrationWorkflow>();
                     reg.RegisterWorkflow<KeyedOrchestrationWorkflow>();
                 })
@@ -343,6 +347,11 @@ public sealed class DaprFixture : IAsyncLifetime
                 .AsAIAgent(
                     instructions: "Reasoning agent",
                     name: ReasoningMockChatClient.AgentName,
+                    tools: [AIFunctionFactory.Create(() => "noted", ReasoningMockChatClient.ToolName, "Takes a note.")]))
+            .WithAgent(_ => new FailOnceChatClient()
+                .AsAIAgent(
+                    instructions: "Reasoning agent",
+                    name: FailOnceChatClient.AgentName,
                     tools: [AIFunctionFactory.Create(() => "noted", ReasoningMockChatClient.ToolName, "Takes a note.")]))
             // --- Session history test agent: records the message count seen on each LLM call ---
             .WithAgent(_ => new MessageCountMockChatClient(historyRecorder)

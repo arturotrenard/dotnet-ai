@@ -181,6 +181,10 @@ constrains how you may write code:
   backend reads the key after a failed create rather than trusting the status. The Dapr client also
   returns defaults instead of throwing when cancelled, hence the cancellation checks after each call.
   `ConversationStoreRedisTests` pins each of these sidecar behaviors.
+  An agent run writes to the store only through `AppendConversationTurnActivity`, after its final
+  response, and only when `DaprAgentInvocation.ConversationId` is set: without one `AgentRunWorkflow`
+  must schedule exactly the activities it always did and call no `NewGuid()`, or in-flight instances stop
+  replaying. The golden tests in `Runtime/ConversationRunTests.cs` pin that sequence.
 
 ## Two unrelated things called "skills"
 

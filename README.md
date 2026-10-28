@@ -182,7 +182,7 @@ builder.Services.AddDaprAgents()
 ```
 
 It registers `IConversationStore`, which loads a conversation's history and appends one run's
-messages to it as a turn:
+messages to it as a turn (the agent runs below use it for you):
 
 - **A turn is stored all at once or not at all.** Its messages are written first, then a small
   manifest is committed with an ETag check, so a reader never sees half a turn.
@@ -213,6 +213,38 @@ messages that a conversation still references.
 > An append whose outcome cannot be confirmed (a lost reply) can leave unreferenced documents
 > behind. They are deleted once they provably cannot become part of the conversation; otherwise the
 > TTL removes them, so setting one is recommended.
+
+### Running agents against a stored conversation
+Inside a workflow, `RunAgentInConversationAsync` runs the agent on everything already committed to the
+conversation, its own earlier reasoning included, and appends the run as one turn if it succeeds:
+
+```csharp
+var planner = context.GetAgent("Planner");
+var conversationId = $"{context.InstanceId}/planning"; // deterministic: never Guid.NewGuid() in a workflow
+
+var first = await context.RunAgentInConversationAsync(planner, conversationId, "Draft a plan.");
+var second = await context.RunAgentInConversationAsync(planner, conversationId, "Now shorten it.");
+
+await context.DeleteConversationAsync(conversationId); // or rely on TimeToLive
+```
+
+Outside a workflow, attach a session to the conversation and run agents through the invoker:
+
+```csharp
+var session = invoker.AttachConversation("customer-42");
+await invoker.RunAgentAsync(agent, "Hi, I need help with my order.", session);
+await invoker.RunAgentAsync(agent, "It arrived damaged.", session); // sees the first turn
+```
+
+- **The history does not travel in workflow payloads.** Each LLM call loads it from the store, pinned to
+  what the run's first call saw, so every call of a run sees the same history.
+- **A failed run appends nothing**, so retrying it with the same conversation id is safe.
+- **A run that hits its iteration limit appends its messages too**, ending with the tool results, as
+  `TurnMessages` returns them.
+- **Reasoning follows `WithReasoningReplay`.** It is stored and sent back only to the agent and chat
+  client that produced it, and not stored at all with `WithinRun` or `Off`.
+- A run takes its history from a conversation or from `RunAgentWithHistoryAsync`'s prior messages, not
+  both. Runs without a conversation id work exactly as before.
 
 ## Model reasoning
 When the chat client returns the model's reasoning as `TextReasoningContent` (reasoning models

@@ -221,11 +221,19 @@ internal sealed partial class DaprConversationStore : IConversationStore
                     stored.FirstSequence, manifest!.NextSequence, stored.BaseMoved);
             }
 
+            // A turn produced against stored history needs that history to still exist: otherwise the turn
+            // would start a new conversation that depends on messages nobody can load any more.
+            if (turn.BaseIncarnation is not null
+                && !string.Equals(turn.BaseIncarnation, manifest?.Incarnation, StringComparison.Ordinal))
+            {
+                throw new ConversationNotFoundException(turn.ConversationId,
+                    $"Conversation '{turn.ConversationId}' was deleted or expired while turn '{turn.TurnId}' was produced from its history, so the turn is not stored.");
+            }
+
             var now = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
             var next = manifest?.NextSequence ?? 0;
             var incarnation = manifest?.Incarnation ?? Guid.NewGuid().ToString("N");
-            var baseMoved = next != turn.BaseSequence
-                || (turn.BaseIncarnation is not null && turn.BaseIncarnation != incarnation);
+            var baseMoved = next != turn.BaseSequence;
             var entries = turn.Messages.Select((message, i) => new StoredConversationEntry
             {
                 Sequence = next + i,

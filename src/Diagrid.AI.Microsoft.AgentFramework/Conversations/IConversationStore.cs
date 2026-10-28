@@ -57,6 +57,9 @@ public interface IConversationStore
     /// <param name="turn">The turn to append.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>Where the turn was stored.</returns>
+    /// <exception cref="ConversationNotFoundException">
+    /// The history the turn was produced against (<see cref="ConversationTurn.BaseIncarnation"/>) was deleted or expired.
+    /// </exception>
     /// <exception cref="ConversationStoreException">The turn could not be committed.</exception>
     Task<ConversationAppendResult> AppendTurnAsync(ConversationTurn turn, CancellationToken cancellationToken = default);
 
