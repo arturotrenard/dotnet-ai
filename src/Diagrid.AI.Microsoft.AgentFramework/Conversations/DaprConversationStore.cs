@@ -98,7 +98,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
 
         for (var attempt = 1; attempt <= MaxLoadAttempts; attempt++)
         {
-            var (manifest, _) = await ReadManifestAsync(key, cancellationToken).ConfigureAwait(false);
+            var (manifest, etag) = await ReadManifestAsync(key, cancellationToken).ConfigureAwait(false);
             if (manifest is not { Deleted: false } live)
             {
                 if (upToSequence is null or 0)
@@ -122,6 +122,11 @@ internal sealed partial class DaprConversationStore : IConversationStore
             {
                 throw new ConversationNotFoundException(conversationId,
                     $"Conversation '{conversationId}' has {live.NextSequence} entries, fewer than the {upTo} requested. It was deleted and created again.");
+            }
+
+            if (attempt == 1)
+            {
+                await RenewTtlAsync(key, conversationId, live, etag, cancellationToken).ConfigureAwait(false);
             }
 
             if (upTo == 0)
@@ -693,6 +698,55 @@ internal sealed partial class DaprConversationStore : IConversationStore
     }
 
     /// <summary>
+    /// Renews a conversation's TTL when it is read, so one that a long run keeps reading (a tool loop paused longer
+    /// than the TTL, waiting on a quota) does not expire under it. Only appends renewed it before. Once half the TTL
+    /// has passed since the manifest was written, its chunks are rewritten first when half their own margin is used
+    /// (so they keep outliving it), then the manifest is written again unchanged, conditioned on the ETag just read.
+    /// Best effort: a lost race means another writer renewed it, and a failure is logged and leaves the load as it was.
+    /// </summary>
+    private async Task RenewTtlAsync(
+        string key, string conversationId, ConversationManifest live, string? etag, CancellationToken cancellationToken)
+    {
+        if (_options.TimeToLive is not { } ttl || etag is null)
+        {
+            return;
+        }
+
+        var now = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
+        var half = (long)ttl.TotalMilliseconds / 2;
+        if (now - live.ModifiedMs < half)
+        {
+            return;
+        }
+
+        try
+        {
+            if (live.Chunks.Count > 0 && (live.ChunkTtlSeconds != ChunkTtlSeconds || now - live.ChunksWrittenMs >= half))
+            {
+                if (!await RefreshChunksAsync(key, live.Chunks, ChunkTtlSeconds, cancellationToken).ConfigureAwait(false))
+                {
+                    // A concurrent append replaced a chunk, so it moved the manifest and renewed the TTL itself.
+                    return;
+                }
+
+                live.ChunksWrittenMs = now;
+                live.ChunkTtlSeconds = ChunkTtlSeconds;
+            }
+
+            live.ModifiedMs = Math.Max(now, live.ModifiedMs + 1);
+            var document = JsonSerializer.SerializeToElement(live, ConversationStoreJsonContext.Default.ConversationManifest);
+            if (await _backend.TrySaveAsync(key, document, etag, _options.TimeToLiveSeconds, cancellationToken).ConfigureAwait(false))
+            {
+                LogTtlRenewed(conversationId);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogTtlRenewFailed(ex, conversationId);
+        }
+    }
+
+    /// <summary>
     /// Rewrites the kept chunks unchanged with a fresh TTL, so they outlive the manifest. Returns false when one
     /// of them is gone, which means a concurrent append has moved the manifest.
     /// </summary>
@@ -838,6 +892,12 @@ internal sealed partial class DaprConversationStore : IConversationStore
 
     [LoggerMessage(LogLevel.Debug, "A chunk of conversation '{ConversationId}' was replaced while loading it (attempt {Attempt}); reading it again.")]
     private partial void LogChunkMissingOnLoad(string conversationId, int attempt);
+
+    [LoggerMessage(LogLevel.Debug, "Conversation '{ConversationId}' was read after half its TTL; its expiry was renewed.")]
+    private partial void LogTtlRenewed(string conversationId);
+
+    [LoggerMessage(LogLevel.Warning, "Could not renew the TTL of conversation '{ConversationId}' while reading it; the next read or append tries again.")]
+    private partial void LogTtlRenewFailed(Exception exception, string conversationId);
 
     [LoggerMessage(LogLevel.Warning, "Could not delete {Count} unreferenced conversation chunk(s); they are left for the state store TTL.")]
     private partial void LogDeleteFailed(Exception exception, int count);

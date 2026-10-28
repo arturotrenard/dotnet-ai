@@ -386,6 +386,43 @@ public sealed class ConversationRunTests
     // ── Review regressions ─────────────────────────────────────────────────
 
     [Fact]
+    public async Task Conversation_AStoredTurn_IsNotFailedByTheProvidersNotification()
+    {
+        // A failed run is retried as a new run with a new turn id, so failing here would store the turn twice.
+        var context = new TestWorkflowContext("wf-1", (name, input) => name switch
+        {
+            nameof(ResolveAgentContextActivity) => Task.FromResult<object?>(new ResolveAgentContextOutput()),
+            nameof(CompleteAgentContextActivity) => throw new WorkflowTaskFailedException("failed",
+                new WorkflowTaskFailureDetails(nameof(InvalidOperationException), "session lost", null)),
+            nameof(AppendConversationTurnActivity) => Task.FromResult<object?>(
+                new ConversationAppendResult(ConversationAppendStatus.Appended, 5, 7, false)),
+            _ => Task.FromResult<object?>(Final(historySequence: 5, incarnation: "inc")),
+        });
+
+        var result = await new AgentRunWorkflow().RunAsync(context,
+            new DaprAgentInvocation(AgentName, "hi", null, null) { ConversationId = ConversationId });
+
+        Assert.Equal("done", result.Response.Text);
+        Assert.Equal([Resolve, CallLlm, Append, Complete], Names(context));
+        Assert.Equal(7, result.ConversationSequence);
+    }
+
+    [Fact]
+    public async Task Golden_WithoutAConversation_AFailedNotificationStillFailsTheRun()
+    {
+        var context = new TestWorkflowContext("wf-1", (name, input) => name switch
+        {
+            nameof(ResolveAgentContextActivity) => Task.FromResult<object?>(new ResolveAgentContextOutput()),
+            nameof(CompleteAgentContextActivity) => throw new WorkflowTaskFailedException("failed",
+                new WorkflowTaskFailureDetails(nameof(InvalidOperationException), "session lost", null)),
+            _ => Task.FromResult<object?>(Final()),
+        });
+
+        await Assert.ThrowsAsync<WorkflowTaskFailedException>(() =>
+            new AgentRunWorkflow().RunAsync(context, new DaprAgentInvocation(AgentName, "hi", null, null)));
+    }
+
+    [Fact]
     public async Task Conversation_ARedeliveredCommit_ReportsWhereThisRunsTurnEnds()
     {
         // The commit landed, its reply was lost, another run appended, and the redelivery found the turn.
