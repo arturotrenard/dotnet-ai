@@ -29,4 +29,7 @@ internal sealed record CallLlmOutput
 
     /// <summary>Tool (function) calls requested by the LLM. Null or empty when <see cref="IsFinal"/> is true.</summary>
     public List<WorkflowFunctionCall>? FunctionCalls { get; init; }
+
+    /// <summary>Reasoning the model returned with this response, in order, or null if none.</summary>
+    public List<WorkflowReasoningContent>? Reasoning { get; init; }
 }

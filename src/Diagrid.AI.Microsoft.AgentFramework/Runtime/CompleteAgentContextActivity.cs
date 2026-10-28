@@ -69,7 +69,7 @@ internal sealed partial class CompleteAgentContextActivity(
 
         var agent = agentRegistry.Get(input.AgentName, input.ChatClientKey, serviceProvider);
         var session = await GetSessionAsync(agent, input.SerializedSessionJson).ConfigureAwait(false);
-        var requestMessages = input.RequestMessages.Select(WorkflowChatMessageConverter.ToChatMessage).ToList();
+        var requestMessages = input.RequestMessages.Select(WorkflowChatMessageConverter.ToProviderMessage).ToList();
 
         using (AgentRunContextScope.Enter(agent, session, requestMessages, input.Options))
         {
@@ -87,7 +87,7 @@ internal sealed partial class CompleteAgentContextActivity(
                             agent,
                             session,
                             requestMessages,
-                            input.ResponseMessages?.Select(WorkflowChatMessageConverter.ToChatMessage) ?? []);
+                            input.ResponseMessages?.Select(WorkflowChatMessageConverter.ToProviderMessage) ?? []);
 #pragma warning restore MAAI001
 
                     await provider.InvokedAsync(invokedContext, CancellationToken.None).ConfigureAwait(false);

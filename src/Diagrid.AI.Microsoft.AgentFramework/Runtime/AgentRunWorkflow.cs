@@ -105,14 +105,16 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
                     messages.Add(new WorkflowChatMessage
                     {
                         Role = "assistant",
-                        Content = llmOutput.Text
+                        Content = llmOutput.Text,
+                        Reasoning = llmOutput.Reasoning
                     });
 
                     await NotifyAgentContextCompleteAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, errorMessage: null);
 
                     return new AgentRunResult
                     {
-                        Response = new AgentResponse(new ChatMessage(ChatRole.Assistant, llmOutput.Text ?? string.Empty)),
+                        Response = new AgentResponse(
+                            WorkflowChatMessageConverter.CreateAssistantMessage(llmOutput.Text, llmOutput.Reasoning)),
                         TurnMessages = messages.Skip(turnStartIndex).ToList()
                     };
                 }
@@ -122,7 +124,10 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
                 {
                     Role = "assistant",
                     Content = llmOutput.Text,
-                    FunctionCalls = llmOutput.FunctionCalls
+                    FunctionCalls = llmOutput.FunctionCalls,
+                    // Kept so the next iteration sends it back: providers such as Anthropic require the
+                    // reasoning that preceded a tool call to accompany its result.
+                    Reasoning = llmOutput.Reasoning
                 });
 
                 // Activity: Execute each tool call as a separate activity.

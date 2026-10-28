@@ -168,6 +168,38 @@ spec:
 > workflow cannot resolve them, so use it only for local testing. Register `WithBinaryStorePayloads`
 > in every app that hosts or schedules these workflows.
 
+## Model reasoning
+When the chat client returns the model's reasoning as `TextReasoningContent` (reasoning models
+such as OpenAI's Responses API, Anthropic extended thinking, or DeepSeek-style
+`reasoning_content`), the agent keeps it:
+
+- The reasoning stays on the assistant message it came with and is sent back to the model on
+  the next LLM call of the run. Providers such as Anthropic require the reasoning, and its
+  signature (`ProtectedData`), that preceded a tool call to accompany the tool result.
+- `AgentRunResult.TurnMessages` carries it (`WorkflowChatMessage.Reasoning`), so passing those
+  messages back as history continues from the earlier reasoning instead of starting from zero:
+
+```csharp
+var first = await context.RunAgentWithHistoryAsync(agent, "Plan the migration.");
+var second = await context.RunAgentWithHistoryAsync(agent, "Now estimate it.", first.TurnMessages);
+```
+
+- The response of a run started from a workflow or with `RunAsync` starts with the final
+  reasoning, followed by the text. `AgentResponse.Text` is unchanged, because it concatenates only
+  text content. A session turn returns the text only, but its reasoning stays in the session
+  history and is sent back on later turns.
+
+Reasoning goes back only to the agent that produced it (same agent name and chat client key),
+because a provider rejects another provider's signed or encrypted reasoning. History passed to a
+different agent keeps its text, tool calls and results, without the reasoning. Blocks that cannot
+be rebuilt faithfully are returned to the caller but not sent back: blocks with no text, such as
+Anthropic `redacted_thinking`, and OpenAI Responses reasoning items, whose `rs_…` id does not
+survive the workflow (rely on the Responses API's own conversation state for those).
+
+`AIContextProvider`s do not see the reasoning, so they receive the same messages as before.
+Clients that do not return reasoning are unaffected; the Dapr Conversation API does not carry
+it today.
+
 ## LLM call timeouts
 Each LLM call is bounded by a timeout, 100 seconds unless you change it. A slow model, such as one
 running locally, can need more. Set a default for every agent, override it per agent, or pass

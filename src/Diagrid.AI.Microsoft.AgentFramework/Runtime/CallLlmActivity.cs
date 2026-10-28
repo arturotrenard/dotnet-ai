@@ -70,14 +70,15 @@ internal sealed partial class CallLlmActivity(
 
         try
         {
-            var messages = BuildChatMessages(config.Instructions, input.AdditionalInstructions, input.AdditionalMessages, input.Messages);
+            var reasoningSource = WorkflowChatMessageConverter.GetReasoningSource(input.AgentName, input.ChatClientKey);
+            var messages = BuildChatMessages(config.Instructions, input.AdditionalInstructions, input.AdditionalMessages, input.Messages, reasoningSource);
             var additionalTools = ResolveAdditionalTools(input.AgentName, input.AdditionalToolNames);
             var options = BuildChatOptions(config.Tools, additionalTools, input.Options);
 
             var response = await config.ChatClient.GetResponseAsync(messages, options, timeoutCts.Token)
                 .ConfigureAwait(false);
 
-            return ParseResponse(response);
+            return ParseResponse(response, reasoningSource);
         }
         // A cancelled gRPC call surfaces as RpcException(Cancelled), not OperationCanceledException,
         // so the token's own state is what tells a timeout apart from any other failure.
@@ -99,7 +100,8 @@ internal sealed partial class CallLlmActivity(
         string? instructions,
         string? additionalInstructions,
         List<WorkflowChatMessage>? additionalMessages,
-        List<WorkflowChatMessage> messages)
+        List<WorkflowChatMessage> messages,
+        string reasoningSource)
     {
         var chatMessages = new List<ChatMessage>();
 
@@ -115,13 +117,14 @@ internal sealed partial class CallLlmActivity(
         {
             foreach (var msg in additionalMessages)
             {
-                chatMessages.Add(WorkflowChatMessageConverter.ToChatMessage(msg));
+                chatMessages.Add(WorkflowChatMessageConverter.ToChatMessage(msg, reasoningSource));
             }
         }
 
+        // Reasoning this agent produced earlier, in this run or a prior turn, goes back to the model.
         foreach (var msg in messages)
         {
-            chatMessages.Add(WorkflowChatMessageConverter.ToChatMessage(msg));
+            chatMessages.Add(WorkflowChatMessageConverter.ToChatMessage(msg, reasoningSource));
         }
 
         return chatMessages;
@@ -215,8 +218,13 @@ internal sealed partial class CallLlmActivity(
         return combined;
     }
 
-    private static CallLlmOutput ParseResponse(ChatResponse response)
+    private static CallLlmOutput ParseResponse(ChatResponse response, string reasoningSource)
     {
+        if (response.Messages.Count == 0)
+        {
+            throw new InvalidOperationException("The LLM returned a response with no messages.");
+        }
+
         var responseMessage = response.Messages[^1];
         var functionCalls = responseMessage.Contents.OfType<FunctionCallContent>().ToList();
         var text = responseMessage.Text;
@@ -227,6 +235,9 @@ internal sealed partial class CallLlmActivity(
         {
             IsFinal = isFinal,
             Text = text,
+            // Some clients return reasoning as a message of its own, so read it from every message.
+            Reasoning = WorkflowChatMessageConverter.ToWorkflowReasoning(
+                response.Messages.SelectMany(m => m.Contents), reasoningSource),
             FunctionCalls = isFinal
                 ? null
                 : functionCalls.Select(fc => new WorkflowFunctionCall
