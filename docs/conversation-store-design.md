@@ -399,6 +399,7 @@ public static Task<bool> DeleteConversationAsync(this WorkflowContext context, s
 - `DaprAgentInvoker.RunStatelessAsync` sets `invocation.ConversationId = session.GetConversationId()`. `IDaprAgentInvoker` gets no new members.
 - **Session workflows:**
   - `DaprSessionOptions { uint? MaxTurns; bool UseConversationStore; }`, plus a new overload `CreateSessionAsync(this IDaprAgentInvoker, DaprWorkflowClient, DaprSessionOptions options, CancellationToken cancellationToken = default)`. The old signature stays unchanged.
+    - **Changed in PR 5:** an overload makes `CreateSessionAsync(client, null)` ambiguous (CS0121) for existing callers, so the method is `CreateStoredSessionAsync(invoker, client, DaprSessionOptions? options = null, ct)` instead, with `DaprSessionOptions { MaxTurns, ConversationId }` and no `UseConversationStore`. `AttachSession(instanceId, conversationId)` reattaches without losing the conversation id.
   - With `UseConversationStore`, the overload sets `SessionWorkflowInput.ConversationId = instanceId`.
   - In `SessionWorkflow`, when `input.ConversationId` is set, the workflow keeps no `conversationLog` and sets `invocation.ConversationId` instead of `PriorMessages`. Its state then stays constant, so a later `ContinueAsNew` can lift `MaxTurns`.
 

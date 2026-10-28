@@ -236,6 +236,21 @@ await invoker.RunAgentAsync(agent, "Hi, I need help with my order.", session);
 await invoker.RunAgentAsync(agent, "It arrived damaged.", session); // sees the first turn
 ```
 
+Session workflows can keep their conversation in the store too, so no growing log is sent with every
+turn. `CreateStoredSessionAsync` creates one:
+
+```csharp
+var session = await invoker.CreateStoredSessionAsync(workflowClient, new DaprSessionOptions { MaxTurns = 50 });
+
+// Keep both ids to reattach later: AttachSession(instanceId, conversationId).
+var instanceId = session.GetSessionInstanceId();
+var conversationId = session.GetConversationId();
+
+// After that session reached MaxTurns, continue the same conversation in a new one:
+var next = await invoker.CreateStoredSessionAsync(workflowClient,
+    new DaprSessionOptions { ConversationId = conversationId });
+```
+
 - **The history does not travel in workflow payloads.** Each LLM call loads it from the store, pinned to
   what the run's first call saw, so every call of a run sees the same history.
 - **A failed run appends nothing**, so retrying it with the same conversation id is safe.
