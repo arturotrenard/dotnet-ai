@@ -57,6 +57,28 @@ public sealed class DaprConversationStateBackendTests
     }
 
     [Fact]
+    public async Task GetBulk_AKeyTheBulkReadFailedOn_IsReadAgainOnItsOwn()
+    {
+        // The client drops per-item errors: the bulk read returns the key without a value.
+        _client.Items["a"] = (Value, "1");
+        _client.BulkDrops.Add("a");
+
+        var found = await CreateBackend().GetBulkAsync(["a"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(["a"], found.Keys);
+    }
+
+    [Fact]
+    public async Task GetBulk_AKeyThatFailsOnItsOwnToo_Throws()
+    {
+        _client.BulkDrops.Add("a");
+        _client.GetError = new DaprException("State operation failed.");
+
+        await Assert.ThrowsAsync<DaprException>(
+            () => CreateBackend().GetBulkAsync(["a"], TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public async Task Save_SendsTtlMetadataOnlyWhenThereIsATtl()
     {
         var backend = CreateBackend();
@@ -148,6 +170,11 @@ public sealed class DaprConversationStateBackendTests
 
         public Exception? SaveError { get; set; }
 
+        public Exception? GetError { get; set; }
+
+        /// <summary>Keys the bulk read returns without a value, as when the store failed on them.</summary>
+        public HashSet<string> BulkDrops { get; } = new(StringComparer.Ordinal);
+
         public bool TrySaveResult { get; set; } = true;
 
         public ConsistencyMode? LastConsistency { get; private set; }
@@ -168,6 +195,11 @@ public sealed class DaprConversationStateBackendTests
             CancellationToken cancellationToken = default) where TValue : default
         {
             LastConsistency = consistencyMode;
+            if (GetError is not null && !cancellationToken.IsCancellationRequested)
+            {
+                throw GetError;
+            }
+
             if (cancellationToken.IsCancellationRequested || !Items.TryGetValue(key, out var item))
             {
                 return Task.FromResult<(TValue?, string?)>((default, null));
@@ -185,7 +217,7 @@ public sealed class DaprConversationStateBackendTests
                 return Task.FromResult<IReadOnlyList<BulkStateItem<TValue>>>([]);
             }
 
-            IReadOnlyList<BulkStateItem<TValue>> items = keys.Select(k => Items.TryGetValue(k, out var item)
+            IReadOnlyList<BulkStateItem<TValue>> items = keys.Select(k => !BulkDrops.Contains(k) && Items.TryGetValue(k, out var item)
                 ? new BulkStateItem<TValue>(k, (TValue)(object)(JsonElement?)item.Value, item.ETag)
                 : new BulkStateItem<TValue>(k, default!, string.Empty)).ToList();
             return Task.FromResult(items);

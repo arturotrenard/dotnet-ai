@@ -66,6 +66,20 @@ internal sealed class DaprConversationStateBackend(
             }
         }
 
+        // The client drops each item's error, so a key the store failed to read looks absent. Absent keys are
+        // rare (a concurrent fold), so each is read again on its own, which throws if the store fails.
+        foreach (var key in keys)
+        {
+            if (!found.ContainsKey(key))
+            {
+                var (value, _) = await GetAsync(key, cancellationToken).ConfigureAwait(false);
+                if (value is { } present)
+                {
+                    found[key] = present;
+                }
+            }
+        }
+
         return found;
     }
 

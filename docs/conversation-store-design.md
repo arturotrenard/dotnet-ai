@@ -174,7 +174,11 @@ Fields are snake_case and set explicitly through the source-generated context. E
 > implementation therefore treats an absent manifest as "could still land", `DeleteAsync` writes a
 > tombstone instead of removing the key, and every manifest carries a random `incarnation`, which a
 > pinned load checks. A first-write conflict comes back as `Internal`, not `Aborted`. Kept chunks are
-> refreshed at half the TTL, or when the TTL changed, and `contentType` metadata is not sent.
+> refreshed at half the TTL, or when the TTL changed. `contentType` metadata is deliberately not sent:
+> on a Redis with the RedisJSON module it switches Dapr to a different write script that stores a JSON
+> document, so behavior would depend on the server's modules, and the values are raw JSON either way.
+> The Dapr client drops per-item errors from a bulk read, so a key that comes back empty is read again
+> on its own, which throws if the store failed.
 
 **Deletion rule.** A chunk written by this call may be deleted only when both of these hold:
 - **(a)** the manifest just read does not reference it;
