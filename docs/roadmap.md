@@ -149,6 +149,8 @@ Solo funciona con Claude, así que para Ollama/glm-5.3 seguimos necesitando nues
 4. `WithReasoning(...)` por agente, y aplicar las `ChatOptions` del agente (#3).
 5. En team_learning_agents, un cliente directo a Ollama que mande `reasoning_effort` y convierta `message.reasoning` en `TextReasoningContent`.
 
+El diseño detallado, con algoritmos, protocolo de commit, división en PRs y tests, está en [`conversation-store-design.md`](conversation-store-design.md). Sale de tres propuestas independientes evaluadas por tres jueces.
+
 Precedente upstream para defenderlo: dapr-agents ya persiste las transcripciones de sesión en un state store de Dapr con este formato. Encaja también con la idea #23 de la Parte B (memoria durable en un state store).
 
 ---
@@ -224,7 +226,7 @@ Solo se cuenta una idea si está en el código de `dapr_agents/` en `main` (no u
 Actualizado el 2026-10-28: el razonamiento pasa adelante, porque es lo que necesita team_learning_agents.
 
 1. **#7:** el bug de `args` en Catalyst. ✅ PR #5 en el fork.
-2. **Historial de sesión durable con razonamiento**, estilo `DaprSessionStore` (ver "Cómo lo resuelve dapr-agents" en la Parte A), junto con #3 (aplicar las `ChatOptions` del agente, incluido `Reasoning`) y `WithReasoning`.
+2. **Historial de sesión durable con razonamiento** (PR 1, capturar y reenviar el razonamiento: PR #6 en el fork), estilo `DaprSessionStore` (ver "Cómo lo resuelve dapr-agents" en la Parte A), junto con #3 (aplicar las `ChatOptions` del agente, incluido `Reasoning`) y `WithReasoning`.
 3. Cliente directo a Ollama en team_learning_agents y bake-off de esfuerzo.
 4. **#1:** reintentos durables.
 5. **#2:** `MaxIterations` configurable y la señal de agotamiento.
