@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Dapr.Workflow;
 using Diagrid.AI.Microsoft.AgentFramework.Abstractions;
+using Diagrid.AI.Microsoft.AgentFramework.Hosting;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -61,9 +62,10 @@ public static partial class WorkflowContextExtensions
         AgentRunOptions? options = null)
     {
         var result = await context.CallChildWorkflowAsync<AgentRunResult>(nameof(AgentRunWorkflow),
-            new DaprAgentInvocation(agent.Name, message, session, options)
+            new DaprAgentInvocation(agent.Name, message, SessionForInput(session), options)
             {
                 ChatClientKey = GetChatClientKey(agent),
+                ConversationId = session.GetConversationId(),
             });
         return result.Response;
     }
@@ -90,9 +92,10 @@ public static partial class WorkflowContextExtensions
         ArgumentNullException.ThrowIfNull(telemetryBaggage);
 
         var result = await context.CallChildWorkflowAsync<AgentRunResult>(nameof(AgentRunWorkflow),
-            new DaprAgentInvocation(agent.Name, message, session, options)
+            new DaprAgentInvocation(agent.Name, message, SessionForInput(session), options)
             {
                 ChatClientKey = GetChatClientKey(agent),
+                ConversationId = session.GetConversationId(),
                 TelemetryBaggage = AgentTelemetryBaggage.Copy(telemetryBaggage)
             });
         return result.Response;
@@ -125,6 +128,68 @@ public static partial class WorkflowContextExtensions
                 PriorMessages = priorMessages,
                 TelemetryBaggage = AgentTelemetryBaggage.Copy(telemetryBaggage)
             });
+
+    /// <summary>
+    /// Invokes an agent as a child workflow against a stored conversation. The agent sees every turn already
+    /// committed to <paramref name="conversationId"/>, including its own earlier reasoning, and if the run
+    /// succeeds its messages are appended as one turn. A failed run appends nothing, so retrying with the same
+    /// id is safe.
+    /// </summary>
+    /// <param name="context">The current workflow context.</param>
+    /// <param name="agent">The agent reference.</param>
+    /// <param name="conversationId">
+    /// The conversation id. Inside a workflow derive it deterministically, for example from
+    /// <c>context.InstanceId</c> or <c>context.NewGuid()</c>, never from <c>Guid.NewGuid()</c>.
+    /// </param>
+    /// <param name="message">The user message for this turn.</param>
+    /// <param name="options">Optional agent run options.</param>
+    /// <param name="telemetryBaggage">Optional custom baggage values to apply inside workflow activities.</param>
+    /// <returns>
+    /// The agent run result. <see cref="AgentRunResult.TurnMessages"/> holds the turn that was appended, and
+    /// <see cref="AgentRunResult.ConversationSequence"/> the conversation's length after it.
+    /// </returns>
+    /// <remarks>
+    /// Requires <c>WithConversationStore(...)</c>. The history does not travel in workflow payloads: each LLM
+    /// call loads it from the store, pinned to what the run's first call saw. Concurrent runs on one
+    /// conversation are ordered by commit, and a run that did not see an earlier commit is still stored after
+    /// it.
+    /// </remarks>
+    public static Task<AgentRunResult> RunAgentInConversationAsync(
+        this WorkflowContext context,
+        IDaprAIAgent agent,
+        string conversationId,
+        string? message = null,
+        AgentRunOptions? options = null,
+        IReadOnlyDictionary<string, string?>? telemetryBaggage = null)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(agent);
+        ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);
+
+        return context.CallChildWorkflowAsync<AgentRunResult>(
+            nameof(AgentRunWorkflow),
+            new DaprAgentInvocation(agent.Name, message, Session: null, Options: options)
+            {
+                ChatClientKey = GetChatClientKey(agent),
+                ConversationId = conversationId,
+                TelemetryBaggage = AgentTelemetryBaggage.Copy(telemetryBaggage)
+            });
+    }
+
+    /// <summary>
+    /// Deletes a stored conversation, as an activity of the current workflow.
+    /// </summary>
+    /// <param name="context">The current workflow context.</param>
+    /// <param name="conversationId">The conversation id.</param>
+    /// <returns><see langword="true"/> if the conversation existed; otherwise <see langword="false"/>.</returns>
+    /// <remarks>Requires <c>WithConversationStore(...)</c>.</remarks>
+    public static Task<bool> DeleteConversationAsync(this WorkflowContext context, string conversationId)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);
+
+        return context.CallActivityAsync<bool>(nameof(DeleteConversationActivity), conversationId);
+    }
 
     /// <summary>
     /// Starts an agent run as a detached workflow and returns its instance ID without waiting for it.
@@ -235,6 +300,13 @@ public static partial class WorkflowContextExtensions
 
     [LoggerMessage(LogLevel.Warning, "The agent didn't respond with a text value")]
     private static partial void LogAgentEmptyResponse(ILogger logger);
+
+    /// <summary>
+    /// The session to put in the run's input. A session from <c>AttachConversation</c> carries only its id,
+    /// which travels as <see cref="DaprAgentInvocation.ConversationId"/>.
+    /// </summary>
+    private static AgentSession? SessionForInput(AgentSession? session) =>
+        session.GetConversationId() is null ? session : null;
 
     private static string? GetChatClientKey(IDaprAIAgent agent) =>
         agent is DaprAIAgent daprAgent ? daprAgent.ChatClientKey : null;

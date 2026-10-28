@@ -85,7 +85,7 @@ internal sealed partial class ResolveAgentContextActivity(
 
         var agent = agentRegistry.Get(input.AgentName, input.ChatClientKey, serviceProvider);
         var session = await agent.CreateSessionAsync().ConfigureAwait(false);
-        var requestMessages = input.RequestMessages.Select(WorkflowChatMessageConverter.ToChatMessage).ToList();
+        var requestMessages = input.RequestMessages.Select(WorkflowChatMessageConverter.ToProviderMessage).ToList();
 
         // Seed the context the way ChatClientAgent does: providers see the agent's instructions,
         // tools and the run's request messages. Only what providers add on top is returned, so the

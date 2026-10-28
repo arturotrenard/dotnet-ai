@@ -12,12 +12,17 @@
 
 using System.Diagnostics.CodeAnalysis;
 using Dapr.AI.Microsoft.Extensions;
+using Dapr.StateManagement;
 using Dapr.Workflow.Payloads;
 using Diagrid.AI.Microsoft.AgentFramework.Abstractions;
+using Diagrid.AI.Microsoft.AgentFramework.Conversations;
+using Diagrid.AI.Microsoft.AgentFramework.Conversations.Internal;
 using Diagrid.AI.Microsoft.AgentFramework.Runtime;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace Diagrid.AI.Microsoft.AgentFramework.Hosting;
 
@@ -200,6 +205,273 @@ public static class DaprAgentsBuilderExtensions
     }
 
     // =========================================================================
+    // Model reasoning
+    //
+    // ChatOptions.Reasoning asks a reasoning model for an effort level. CallLlmActivity builds the
+    // ChatOptions for every LLM call itself, so the effort is registered here and resolved per call,
+    // like the LLM timeout. Reasoning the model returns is kept and sent back to it (see
+    // WorkflowChatMessage.Reasoning); WithReasoningReplay limits that where it costs too much.
+    // =========================================================================
+
+    /// <summary>
+    /// Sets the reasoning effort requested on every LLM call of any agent that has no effort of its own.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="effort">The reasoning effort, sent as <see cref="ChatOptions.Reasoning"/>.</param>
+    /// <param name="output">The reasoning output to request, or <see langword="null"/> for the provider's default.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// An agent's own <see cref="ChatOptions.Reasoning"/>, and <c>WithReasoning(agentName, ...)</c>,
+    /// take precedence. Chat clients that do not support reasoning options ignore it; the Dapr
+    /// Conversation API has no field for it today.
+    /// </remarks>
+    public static IAgentsBuilder WithReasoning(
+        this IAgentsBuilder builder,
+        ReasoningEffort effort,
+        ReasoningOutput? output = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ReasoningEffortRegistration.Validate(effort, output);
+
+        GetServices(builder).AddSingleton(new ReasoningEffortRegistration(null, effort, output));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Sets the reasoning effort requested on every LLM call of the named agent, overriding the
+    /// agent's own <see cref="ChatOptions.Reasoning"/> and the default set by
+    /// <see cref="WithReasoning(IAgentsBuilder, ReasoningEffort, ReasoningOutput?)"/>.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="agentName">The name of the agent the effort applies to.</param>
+    /// <param name="effort">The reasoning effort, sent as <see cref="ChatOptions.Reasoning"/>.</param>
+    /// <param name="output">The reasoning output to request, or <see langword="null"/> for the provider's default.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// Can be called before or after <c>WithAgent(...)</c> for the same agent name.
+    /// </remarks>
+    public static IAgentsBuilder WithReasoning(
+        this IAgentsBuilder builder,
+        string agentName,
+        ReasoningEffort effort,
+        ReasoningOutput? output = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
+        ReasoningEffortRegistration.Validate(effort, output);
+
+        GetServices(builder).AddSingleton(new ReasoningEffortRegistration(agentName, effort, output));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Sets how much earlier reasoning is sent back to the model, for every agent that has no setting
+    /// of its own. Defaults to <see cref="ReasoningReplay.AcrossTurns"/>.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="replay">How much reasoning to send back and keep.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// Sending reasoning back costs input tokens on every call, and keeping it makes the run's
+    /// messages, and the workflow payloads that carry them, larger.
+    /// <see cref="ReasoningReplay.WithinRun"/> keeps it out of the history passed between turns;
+    /// <see cref="ReasoningReplay.Off"/> keeps it out of the messages altogether.
+    /// </remarks>
+    public static IAgentsBuilder WithReasoningReplay(this IAgentsBuilder builder, ReasoningReplay replay)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ReasoningReplayRegistration.Validate(replay);
+
+        GetServices(builder).AddSingleton(new ReasoningReplayRegistration(null, replay));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Sets how much earlier reasoning is sent back to the model for the named agent, overriding the
+    /// default set by <see cref="WithReasoningReplay(IAgentsBuilder, ReasoningReplay)"/>.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="agentName">The name of the agent the setting applies to.</param>
+    /// <param name="replay">How much reasoning to send back and keep.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// Can be called before or after <c>WithAgent(...)</c> for the same agent name.
+    /// </remarks>
+    public static IAgentsBuilder WithReasoningReplay(this IAgentsBuilder builder, string agentName, ReasoningReplay replay)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
+        ReasoningReplayRegistration.Validate(replay);
+
+        GetServices(builder).AddSingleton(new ReasoningReplayRegistration(agentName, replay));
+
+        return builder;
+    }
+
+    // =========================================================================
+    // Conversation store
+    //
+    // History kept in a Dapr state store instead of workflow payloads, so a run started with a
+    // conversation id continues from the earlier turns, model reasoning included, without carrying
+    // them in every activity input. Port of dapr-agents DaprSessionStore.
+    // =========================================================================
+
+    /// <summary>
+    /// Keeps agent conversation history, including model reasoning, in a Dapr state store, so runs started
+    /// with a conversation id continue from the earlier turns without carrying them in workflow payloads.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="stateStoreName">
+    /// The Dapr state store component. It must support ETags, and also TTL when
+    /// <see cref="DaprConversationStoreOptions.TimeToLive"/> is set.
+    /// </param>
+    /// <param name="configure">Optional further settings, such as a TTL or the key prefix.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// <para>
+    /// Registers <see cref="IConversationStore"/> only when none is registered yet, so a store registered by the
+    /// host before this call is kept.
+    /// </para>
+    /// <para>
+    /// Keys start with <see cref="DaprConversationStoreOptions.KeyPrefix"/>, after the component's own key prefix
+    /// (the app id by default), so conversations are per app and can share the workflow state store. Setting
+    /// <see cref="DaprConversationStoreOptions.TimeToLive"/> is recommended: it also removes the rare documents
+    /// an append leaves behind when it cannot confirm whether its commit landed.
+    /// </para>
+    /// </remarks>
+    public static IAgentsBuilder WithConversationStore(
+        this IAgentsBuilder builder,
+        string stateStoreName,
+        Action<DaprConversationStoreOptions>? configure = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stateStoreName);
+
+        var options = new DaprConversationStoreOptions { StateStoreName = stateStoreName };
+        configure?.Invoke(options);
+        options.Validate();
+
+        GetServices(builder).TryAddSingleton<IConversationStore>(sp => new DaprConversationStore(
+            new DaprConversationStateBackend(sp.GetRequiredService<DaprStateManagementClient>(), options),
+            options,
+            sp.GetService<TimeProvider>() ?? TimeProvider.System,
+            sp.GetService<ILogger<DaprConversationStore>>()));
+
+        return builder;
+    }
+
+    // =========================================================================
+    // Context window and conversation compaction
+    //
+    // WithContextWindow caps what each LLM call sends to what fits the model; it changes nothing that
+    // is stored. WithConversationCompaction summarizes a stored conversation's older turns once it grows,
+    // and saves the summary in the store, so it is computed once rather than on every call.
+    // =========================================================================
+
+    /// <summary>
+    /// Sets the context window of every agent's model, so each LLM call trims what came before the run to the room
+    /// the run leaves: older tool results are collapsed first, then the oldest messages are dropped. The stored
+    /// history is not changed.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="maxContextTokens">The model's context window, in tokens.</param>
+    /// <param name="maxOutputTokens">The tokens to keep free for the model's reply.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// Uses Microsoft Agent Framework's <c>ContextWindowCompactionStrategy</c>: above half of the input budget
+    /// (<paramref name="maxContextTokens"/> - <paramref name="maxOutputTokens"/>) it collapses older tool calls and
+    /// their results into short text, and above 80 % it drops the oldest message groups. System messages are always
+    /// kept, and a tool call is never separated from its results. The run's own messages are never trimmed, so a
+    /// single run larger than the window is still sent whole. Tokens are estimated as bytes / 4.
+    /// </remarks>
+    public static IAgentsBuilder WithContextWindow(this IAgentsBuilder builder, int maxContextTokens, int maxOutputTokens)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ContextWindowRegistration.Validate(maxContextTokens, maxOutputTokens);
+
+        GetServices(builder).AddSingleton(new ContextWindowRegistration(null, maxContextTokens, maxOutputTokens));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Sets the context window of the named agent's model, overriding the default set by
+    /// <see cref="WithContextWindow(IAgentsBuilder, int, int)"/>.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="agentName">The name of the agent.</param>
+    /// <param name="maxContextTokens">The model's context window, in tokens.</param>
+    /// <param name="maxOutputTokens">The tokens to keep free for the model's reply.</param>
+    /// <returns>The agents builder.</returns>
+    public static IAgentsBuilder WithContextWindow(
+        this IAgentsBuilder builder, string agentName, int maxContextTokens, int maxOutputTokens)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
+        ContextWindowRegistration.Validate(maxContextTokens, maxOutputTokens);
+
+        GetServices(builder).AddSingleton(new ContextWindowRegistration(agentName, maxContextTokens, maxOutputTokens));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Compacts every agent's stored conversations: once the history a run loads is estimated above
+    /// <see cref="ConversationCompactionOptions.TriggerTokens"/>, the turns before the most recent
+    /// <see cref="ConversationCompactionOptions.KeepRecentTurns"/> are summarized after the run, and later runs
+    /// load the summary in their place.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="configure">Sets the options; <see cref="ConversationCompactionOptions.TriggerTokens"/> is required.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// Applies to runs against a stored conversation (<c>WithConversationStore(...)</c>). The summary is appended to
+    /// the conversation and the original messages stay stored. Compaction is best effort: if the summary call fails,
+    /// the run still succeeds and the next run tries again.
+    /// </remarks>
+    public static IAgentsBuilder WithConversationCompaction(
+        this IAgentsBuilder builder, Action<ConversationCompactionOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        GetServices(builder).AddSingleton(new ConversationCompactionRegistration(null, BuildCompactionOptions(configure)));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Compacts the named agent's stored conversations, overriding the default set by
+    /// <see cref="WithConversationCompaction(IAgentsBuilder, Action{ConversationCompactionOptions})"/>.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="agentName">The name of the agent.</param>
+    /// <param name="configure">Sets the options; <see cref="ConversationCompactionOptions.TriggerTokens"/> is required.</param>
+    /// <returns>The agents builder.</returns>
+    public static IAgentsBuilder WithConversationCompaction(
+        this IAgentsBuilder builder, string agentName, Action<ConversationCompactionOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        GetServices(builder).AddSingleton(new ConversationCompactionRegistration(agentName, BuildCompactionOptions(configure)));
+
+        return builder;
+    }
+
+    private static ConversationCompactionOptions BuildCompactionOptions(Action<ConversationCompactionOptions> configure)
+    {
+        var options = new ConversationCompactionOptions();
+        configure(options);
+        options.Validate();
+        return options;
+    }
+
+    // =========================================================================
     // Binary store payloads
     //
     // Every agent turn carries the whole conversation across activity boundaries (CallLlmInput,
@@ -314,7 +586,15 @@ public static class DaprAgentsBuilderExtensions
         return builder.WithAgent(new AgentFactoryRegistration(sp =>
         {
             var chatClient = sp.GetRequiredKeyedService<IChatClient>(conversationComponentName);
-            return factory(chatClient);
+            var agent = factory(chatClient);
+
+            // Registered under the explicit name, which is what CallLlmActivity looks the agent up by.
+            if (agent is ChatClientAgent cca)
+            {
+                RegisterAgentComponents(sp, agent, DaprAgentsBuilder.UnwrapFunctionInvoking(cca.ChatClient), agentName);
+            }
+
+            return agent;
         })
         {
             Name = agentName,
@@ -570,27 +850,34 @@ public static class DaprAgentsBuilderExtensions
     /// Uses <see cref="DaprAgentsBuilder.GetAgentChatOptions"/> (backed by
     /// <c>[UnsafeAccessor]</c>) for AOT-safe access to the internal ChatOptions property.
     /// </summary>
-    internal static void RegisterAgentComponents(IServiceProvider sp, AIAgent agent, IChatClient rawChatClient)
+    internal static void RegisterAgentComponents(
+        IServiceProvider sp,
+        AIAgent agent,
+        IChatClient rawChatClient,
+        string? registeredName = null)
     {
-        var agentName = agent.Name;
+        var agentName = registeredName ?? agent.Name;
         if (string.IsNullOrWhiteSpace(agentName))
             return;
 
         string? instructions = null;
         IList<AITool>? tools = null;
         IReadOnlyList<AIContextProvider>? contextProviders = null;
+        ChatOptions? baseOptions = null;
 
         if (agent is ChatClientAgent cca)
         {
             instructions = cca.Instructions;
-            tools = DaprAgentsBuilder.GetAgentChatOptions(cca)?.Tools;
+            var agentOptions = DaprAgentsBuilder.GetAgentChatOptions(cca);
+            tools = agentOptions?.Tools;
+            baseOptions = ToBaseOptions(agentOptions);
             // Picks up AIContextProviders set via ChatClientAgentOptions (e.g. an MAF
             // AgentSkillsProvider) with no extra API needed for this (generic factory) path.
             contextProviders = cca.AIContextProviders is { Count: > 0 } ? cca.AIContextProviders : null;
         }
 
         var chatClientRegistry = sp.GetRequiredService<ChatClientRegistry>();
-        chatClientRegistry.Register(agentName, WrapIfNeeded(rawChatClient), instructions, tools, contextProviders);
+        chatClientRegistry.Register(agentName, WrapIfNeeded(rawChatClient), instructions, tools, contextProviders, baseOptions);
 
         var toolRegistry = sp.GetRequiredService<ToolRegistry>();
         if (tools is { Count: > 0 })
@@ -603,6 +890,32 @@ public static class DaprAgentsBuilderExtensions
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// The agent's own <see cref="ChatOptions"/> that <see cref="CallLlmActivity"/> starts every LLM
+    /// call from (temperature, output limits, reasoning, ...), without what it supplies itself or
+    /// cannot honour: the tools are merged per call, the instructions are sent as the system
+    /// message, a server-side conversation id would make the provider see the conversation twice,
+    /// and the workflow neither polls background responses nor resumes from a continuation token,
+    /// so those are left to the run's own <see cref="AgentRunOptions"/>.
+    /// </summary>
+    private static ChatOptions? ToBaseOptions(ChatOptions? agentOptions)
+    {
+        if (agentOptions is null)
+        {
+            return null;
+        }
+
+        var baseOptions = agentOptions.Clone();
+        baseOptions.Tools = null;
+        baseOptions.Instructions = null;
+        baseOptions.ConversationId = null;
+#pragma warning disable MEAI001
+        baseOptions.AllowBackgroundResponses = null;
+        baseOptions.ContinuationToken = null;
+#pragma warning restore MEAI001
+        return baseOptions;
     }
 
     /// <summary>

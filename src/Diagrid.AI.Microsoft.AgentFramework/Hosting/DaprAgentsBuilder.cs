@@ -124,6 +124,12 @@ internal sealed class DaprAgentsBuilder(
     }
 
     /// <summary>
+    /// The client a <see cref="DelegatingChatClient"/> wraps, for walking a client pipeline.
+    /// </summary>
+    internal static IChatClient? GetDelegatingInnerClient(DelegatingChatClient client) =>
+        GetInnerClient(client);
+
+    /// <summary>
     /// Extracts the <see cref="ChatOptions"/> from a <see cref="ChatClientAgent"/> using
     /// <see cref="UnsafeAccessorAttribute"/> — AOT-safe, no runtime reflection.
     /// </summary>
