@@ -221,27 +221,58 @@ Solo se cuenta una idea si está en el código de `dapr_agents/` en `main` (no u
 
 ---
 
-## Orden de trabajo propuesto
+## Checklist
 
-Actualizado el 2026-10-28: el razonamiento pasa adelante, porque es lo que necesita team_learning_agents.
+Actualizado el 2026-10-28. Cada punto va primero al fork (`dev`) y después, si aplica, a upstream desde una rama basada en `upstream/master`.
 
-1. **#7:** el bug de `args` en Catalyst. ✅ PR #5 en el fork.
-2. **Historial de sesión durable con razonamiento**, estilo `DaprSessionStore` (ver "Cómo lo resuelve dapr-agents" en la Parte A). Plan en `docs/conversation-store-design.md` §6:
-   - PR 1, capturar y reenviar el razonamiento. ✅ PR #6 en el fork.
-   - PR 2, aplicar las `ChatOptions` del agente (#3), `WithReasoning` y `WithReasoningReplay`. ✅ PR #7 en el fork.
-   - PR 3, el store (`WithConversationStore`, `IConversationStore`). PR #8 en el fork.
-   - PR 4, correr agentes contra una conversación guardada (`RunAgentInConversationAsync`, `AttachConversation`). PR #9 en el fork.
-   - PR 5, `SessionWorkflow` respaldado por el store (`CreateStoredSessionAsync`). En curso.
-   - PR 6, tope de contexto (`WithContextWindow`) y compactación persistida en el store (`WithConversationCompaction`). dapr-agents no tiene ninguna de las dos: manda todo el historial y, si se pasa del contexto, reintenta el mismo prompt. En curso.
-   - Después, según se necesite: caché de chunks, `ContinueAsNew` en `SessionWorkflow`, conteo real de tokens con el uso que reporta el proveedor.
-3. Cliente directo a Ollama en team_learning_agents y bake-off de esfuerzo.
-4. **#1:** reintentos durables.
-5. **#2:** `MaxIterations` configurable y la señal de agotamiento.
-6. **#4:** uso de tokens y `FinishReason`.
-7. **#5:** versionado de workflows, antes de #9, #11 o #12.
-8. Lo demás según los resultados y lo que vaya entrando upstream.
+### Hecho en el fork (`dev`)
 
-Cada punto va primero al fork (`dev`) y después, si aplica, a upstream desde una rama basada en `upstream/master`, con un PR chico.
+- [x] #7: `args` de Catalyst según el esquema de dapr-agents (fork #5).
+- [x] PR 1, capturar y reenviar el razonamiento (fork #6).
+- [x] PR 2, `ChatOptions` del agente (#3), `WithReasoning` y `WithReasoningReplay` (fork #7).
+- [x] PR 3, el store (`WithConversationStore`, `IConversationStore`) (fork #8).
+- [x] PR 4, runs contra una conversación guardada (`RunAgentInConversationAsync`, `AttachConversation`) (fork #9, llevado a `dev` con #12).
+- [x] PR 5, sesiones respaldadas por el store (`CreateStoredSessionAsync`) (fork #10, idem).
+- [x] PR 6, tope de contexto (`WithContextWindow`) y compactación persistida (`WithConversationCompaction`) (fork #11, idem). dapr-agents no tiene ninguna de las dos.
+- [ ] Mergear el fork #13: registrar el `DaprConversationClient` sin clave aunque el host tenga uno keyed (hallazgo de Copilot en upstream #99).
+
+### Upstream (`diagridio/dotnet-ai`), un PR por funcionalidad
+
+- [x] #100, Dapr SDK 1.19: aprobado por Yaron.
+- [ ] #99, timeout del LLM por agente: CI en verde; corregido el hallazgo de Copilot; pendiente de revisión.
+- [ ] #107, runs detached y binary store: depende de #100.
+- [ ] #108, razonamiento e historial durable con contexto y compactación: depende de #100, #107 y #99.
+- [ ] #109, una tool que falla vuelve al modelo y las respuestas tipadas respetan su contexto JSON (antes #96 y #97).
+- [ ] #106, `args` de Catalyst.
+- [ ] #98, ejemplo `TeamLearningDemo`.
+- [ ] Opcional: aclarar en los cierres de #101 y #102 que #107 ya no incluye el timeout.
+
+Orden de merge: #100 → #99 → #107 → #108. #109, #106 y #98 son independientes.
+
+### Siguiente: que glm-5.3 use todo esto (team_learning_agents)
+
+Por Dapr Conversation el razonamiento no sale ni entra y el esfuerzo no se puede mandar (ver la Parte A), así que el enfoque es híbrido: cliente directo solo para los agentes que razonan.
+
+- [ ] `IChatClient` directo a Ollama Cloud:
+  - [ ] leer `message.reasoning` como `TextReasoningContent`;
+  - [ ] reenviar el razonamiento del historial en el campo de salida;
+  - [ ] mandar `reasoning_effort` desde `ChatOptions.Reasoning`, nunca `"none"`.
+- [ ] Usarlo solo en los agentes que razonan; el resto sigue en Dapr.
+- [ ] Pasar team_learning_agents al store: `RunAgentInConversationAsync`, con `WithContextWindow` y `WithConversationCompaction`.
+- [ ] Probar en vivo con glm-5.3:
+  - [ ] ¿usa el razonamiento reenviado?
+  - [ ] ¿el esfuerzo cambia la profundidad o la calidad? (bake-off)
+  - [ ] ¿la compactación funciona con un modelo real?
+- [ ] Abrir un issue en Dapr con lo medido: el proto de la Conversation API no tiene campos de razonamiento, langchaingo lee solo `reasoning_content` y no hay forma de mandar el esfuerzo.
+
+### Después (Parte B)
+
+- [ ] #1: reintentos durables del LLM.
+- [ ] #2: `MaxIterations` configurable y la señal de agotamiento.
+- [ ] #4: uso de tokens y `FinishReason`; además daría un conteo real para el tope de contexto en vez de estimar.
+- [ ] #5: versionado de workflows, antes de #9, #11 o #12.
+- [ ] Según se necesite: caché de chunks, `ContinueAsNew` en `SessionWorkflow`.
+- [ ] Lo demás según los resultados y lo que vaya entrando upstream.
 
 ## Pendiente de verificar
 
