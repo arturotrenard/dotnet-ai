@@ -376,6 +376,133 @@ public sealed class DaprConversationStoreTests
     }
 
     [Fact]
+    public async Task Ttl_ALoadAfterHalfTheTtl_RenewsTheManifestAndItsChunks()
+    {
+        // Review regression: only appends renewed the TTL, so a run paused longer than it lost its conversation.
+        var store = CreateStore(o => o.TimeToLive = TimeSpan.FromSeconds(100));
+        await store.AppendTurnAsync(Turn("t1", 0, User("hi"), Assistant("hello")), TestContext.Current.CancellationToken);
+        var chunk = ChunkKeys().Single();
+        _backend.Log.Clear();
+
+        _clock.Now = Start.AddSeconds(60);
+        var snapshot = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, snapshot.Entries.Count);
+        Assert.Contains($"save:{chunk}", _backend.Log);
+        Assert.Contains($"trysave:{ManifestKey}", _backend.Log);
+        Assert.Equal(100, _backend.TtlOf(ManifestKey));
+        Assert.Equal(200, _backend.TtlOf(chunk));
+        Assert.Equal(Start.AddSeconds(60).ToUnixTimeMilliseconds(), Manifest().ModifiedMs);
+        Assert.Equal(Start.AddSeconds(60).ToUnixTimeMilliseconds(), Manifest().ChunksWrittenMs);
+
+        // The next append still lands on the renewed manifest.
+        var appended = await store.AppendTurnAsync(Turn("t2", 2, User("again")), TestContext.Current.CancellationToken);
+        Assert.Equal(ConversationAppendStatus.Appended, appended.Status);
+        Assert.Equal(3, (await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken)).Entries.Count);
+    }
+
+    [Fact]
+    public async Task Ttl_ALoadCloseToExpiry_DoesNotRenew()
+    {
+        // Within the last quarter of the TTL a renewal could reach an expired key, which Redis would accept.
+        var store = CreateStore(o => o.TimeToLive = TimeSpan.FromSeconds(100));
+        await store.AppendTurnAsync(Turn("t1", 0, User("hi")), TestContext.Current.CancellationToken);
+        _backend.Log.Clear();
+
+        _clock.Now = Start.AddSeconds(80);
+        await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain(_backend.Log, l => l.StartsWith("save:", StringComparison.Ordinal) || l.StartsWith("trysave", StringComparison.Ordinal));
+        Assert.Equal(Start.ToUnixTimeMilliseconds(), Manifest().ModifiedMs);
+    }
+
+    [Fact]
+    public async Task Ttl_ARenewalWhoseChunkWritesRanIntoTheMargin_DoesNotWriteTheManifest()
+    {
+        var store = CreateStore(o => o.TimeToLive = TimeSpan.FromSeconds(100));
+        await store.AppendTurnAsync(Turn("t1", 0, User("hi")), TestContext.Current.CancellationToken);
+        _backend.Log.Clear();
+        _clock.Now = Start.AddSeconds(60);
+
+        // The chunk rewrite is slow: by the time it is done, the manifest is in its last quarter.
+        _backend.FailSave = _ =>
+        {
+            _clock.Now = Start.AddSeconds(90);
+            return false;
+        };
+        await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain(_backend.Log, l => l.StartsWith("trysave", StringComparison.Ordinal));
+        Assert.Equal(Start.ToUnixTimeMilliseconds(), Manifest().ModifiedMs);
+    }
+
+    [Fact]
+    public async Task Ttl_ARenewalRacingADelete_DoesNotLeaveDeletedChunksBehind()
+    {
+        var store = CreateStore(o => o.TimeToLive = TimeSpan.FromSeconds(100));
+        await store.AppendTurnAsync(Turn("t1", 0, User("secret")), TestContext.Current.CancellationToken);
+        _clock.Now = Start.AddSeconds(60);
+
+        // The delete lands after the renewal read the chunks and before it writes them back.
+        var deleted = false;
+        _backend.FailSave = _ =>
+        {
+            if (!deleted)
+            {
+                deleted = true;
+                Assert.True(store.DeleteAsync(ConversationId).GetAwaiter().GetResult());
+            }
+
+            return false;
+        };
+        await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(deleted);
+        Assert.Empty(ChunkKeys());
+        Assert.True(Manifest().Deleted);
+    }
+
+    [Fact]
+    public async Task Ttl_ALoadBeforeHalfTheTtl_WritesNothing()
+    {
+        var store = CreateStore(o => o.TimeToLive = TimeSpan.FromSeconds(100));
+        await store.AppendTurnAsync(Turn("t1", 0, User("hi")), TestContext.Current.CancellationToken);
+        _backend.Log.Clear();
+
+        _clock.Now = Start.AddSeconds(49);
+        await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain(_backend.Log, l => l.StartsWith("save:", StringComparison.Ordinal) || l.StartsWith("trysave:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Ttl_ALoadWithoutATtl_WritesNothing()
+    {
+        var store = CreateStore();
+        await store.AppendTurnAsync(Turn("t1", 0, User("hi")), TestContext.Current.CancellationToken);
+        _backend.Log.Clear();
+
+        _clock.Now = Start.AddDays(30);
+        await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain(_backend.Log, l => l.StartsWith("save:", StringComparison.Ordinal) || l.StartsWith("trysave:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Ttl_ARenewalThatFails_LeavesTheLoadAsItWas()
+    {
+        var store = CreateStore(o => o.TimeToLive = TimeSpan.FromSeconds(100));
+        await store.AppendTurnAsync(Turn("t1", 0, User("hi"), Assistant("hello")), TestContext.Current.CancellationToken);
+        _backend.FailSave = k => k.Contains('#');
+
+        _clock.Now = Start.AddSeconds(80);
+        var snapshot = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(["hi", "hello"], snapshot.Entries.Select(e => e.Message.Content));
+        Assert.Equal(Start.ToUnixTimeMilliseconds(), Manifest().ModifiedMs);
+    }
+
+    [Fact]
     public async Task Ttl_ChangedBetweenDeployments_RewritesTheKeptChunksAtOnce()
     {
         var first = CreateStore(o =>

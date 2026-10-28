@@ -15,6 +15,7 @@ using Diagrid.AI.Microsoft.AgentFramework.Abstractions;
 using Diagrid.AI.Microsoft.AgentFramework.Conversations;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace Diagrid.AI.Microsoft.AgentFramework.Runtime;
 
@@ -171,7 +172,7 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
                     var finalCommit = await CommitTurnAsync(context, input, turnId, historySequence, historyIncarnation, finalTurnMessages);
                     await CompactIfDueAsync(context, input, turnId, compactionDue, finalCommit, historyIncarnation);
 
-                    await NotifyAgentContextCompleteAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, errorMessage: null);
+                    await NotifyAfterCommitAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, finalCommit);
 
                     return new AgentRunResult
                     {
@@ -233,7 +234,7 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
             var commit = await CommitTurnAsync(context, input, turnId, historySequence, historyIncarnation, turnMessages);
             await CompactIfDueAsync(context, input, turnId, compactionDue, commit, historyIncarnation);
 
-            await NotifyAgentContextCompleteAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, errorMessage: null);
+            await NotifyAfterCommitAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, commit);
 
             return new AgentRunResult
             {
@@ -254,8 +255,15 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
     /// <summary>
     /// Commits the finished run's messages to its stored conversation, before the context providers are
     /// notified, so they only ever see committed turns. Does nothing, and schedules nothing, without a
-    /// conversation. A failed run never gets here, so it stores nothing.
+    /// conversation. A failed run never gets here, so it stores nothing; once it is here, nothing after the commit
+    /// fails the run (see <see cref="NotifyAfterCommitAsync"/>).
     /// </summary>
+    /// <remarks>
+    /// Cases where a run can still fail with its turn stored, so a caller that retries it as a new run stores the turn
+    /// twice: the run is terminated, or its result is too large to return, right after the commit; or the commit lands
+    /// but its reply is lost and every retry fails (the store is unreachable for longer than the retries last). All three
+    /// need a turn id that stays the same across the caller's retries, which a new run cannot have today.
+    /// </remarks>
     private static async Task<ConversationAppendResult?> CommitTurnAsync(
         WorkflowContext context,
         DaprAgentInvocation input,
@@ -350,6 +358,39 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
             {
                 messages[i] = messages[i] with { Reasoning = null };
             }
+        }
+    }
+
+    /// <summary>
+    /// Notifies the context providers that the run succeeded. Once its turn is stored, a failed notification no longer
+    /// fails the run: the caller would retry it as a new run, with a new turn id the store cannot recognize, and the
+    /// conversation would hold the turn twice. The failure is logged instead. Without a stored turn it fails the run,
+    /// as before conversations existed.
+    /// </summary>
+    private static async Task NotifyAfterCommitAsync(
+        WorkflowContext context,
+        DaprAgentInvocation input,
+        ResolveAgentContextOutput agentContext,
+        List<WorkflowChatMessage> messages,
+        int turnStartIndex,
+        List<WorkflowChatMessage> turnRequestMessages,
+        ConversationAppendResult? commit)
+    {
+        if (commit is null)
+        {
+            await NotifyAgentContextCompleteAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, errorMessage: null);
+            return;
+        }
+
+        try
+        {
+            await NotifyAgentContextCompleteAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, errorMessage: null);
+        }
+        catch (WorkflowTaskFailedException ex)
+        {
+            context.CreateReplaySafeLogger<AgentRunWorkflow>().LogWarning(
+                "Agent '{AgentName}' completed and its turn is stored in conversation '{ConversationId}', but notifying its context providers failed: {Error}",
+                input.AgentName, input.ConversationId, ex.FailureDetails.ErrorMessage);
         }
     }
 
