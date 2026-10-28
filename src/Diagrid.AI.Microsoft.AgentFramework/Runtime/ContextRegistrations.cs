@@ -10,7 +10,9 @@
 // On the Change Date, this software will be available under
 // the Apache License, Version 2.0.
 
+using System.Text.Json;
 using Diagrid.AI.Microsoft.AgentFramework.Conversations;
+using Microsoft.Extensions.AI;
 
 namespace Diagrid.AI.Microsoft.AgentFramework.Runtime;
 
@@ -90,6 +92,35 @@ internal sealed record ConversationCompactionRegistration(string? AgentName, Con
 internal static class TokenEstimate
 {
     internal static long Of(IEnumerable<string?> texts) => texts.Sum(t => (long)(t?.Length ?? 0)) / 4;
+
+    /// <summary>The estimate for chat messages as they are sent: text, reasoning, tool calls and tool results.</summary>
+    internal static long Of(IEnumerable<ChatMessage> messages)
+    {
+        long chars = 0;
+        foreach (var message in messages)
+        {
+            foreach (var content in message.Contents)
+            {
+                chars += content switch
+                {
+                    TextContent text => text.Text?.Length ?? 0,
+                    TextReasoningContent reasoning => (long)(reasoning.Text?.Length ?? 0) + (reasoning.ProtectedData?.Length ?? 0),
+                    FunctionCallContent call => call.Name.Length
+                        + (call.Arguments is { Count: > 0 } args ? JsonSerializer.Serialize(args).Length : 0),
+                    FunctionResultContent result => result.Result switch
+                    {
+                        null => 0,
+                        string s => s.Length,
+                        JsonElement e => e.GetRawText().Length,
+                        var other => JsonSerializer.Serialize(other).Length,
+                    },
+                    _ => 0,
+                };
+            }
+        }
+
+        return chars / 4;
+    }
 
     internal static long Of(IEnumerable<WorkflowChatMessage> messages)
     {

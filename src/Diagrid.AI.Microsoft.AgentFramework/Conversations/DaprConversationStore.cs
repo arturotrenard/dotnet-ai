@@ -698,12 +698,20 @@ internal sealed partial class DaprConversationStore : IConversationStore
     }
 
     /// <summary>
-    /// Renews a conversation's TTL when it is read, so one that a long run keeps reading (a tool loop paused longer
-    /// than the TTL, waiting on a quota) does not expire under it. Only appends renewed it before. Once half the TTL
-    /// has passed since the manifest was written, its chunks are rewritten first when half their own margin is used
-    /// (so they keep outliving it), then the manifest is written again unchanged, conditioned on the ETag just read.
-    /// Best effort: a lost race means another writer renewed it, and a failure is logged and leaves the load as it was.
+    /// Renews a conversation's TTL when it is read between half the TTL and a margin before it expires, so a run that
+    /// keeps reading its history at least that often does not lose it. A single pause longer than the TTL (between two
+    /// reads, or after the last one) still does: size <see cref="DaprConversationStoreOptions.TimeToLive"/> for the
+    /// longest pause. The chunks are rewritten first when half their own margin is used (so they keep outliving the
+    /// manifest), then the manifest is written again unchanged, conditioned on the ETag just read.
     /// </summary>
+    /// <remarks>
+    /// No renewal is tried in the last stretch before expiry (<see cref="RenewalMargin"/>), and the clock is checked
+    /// again before the manifest is written: Redis accepts a save conditioned on any ETag once the key is gone, so a
+    /// renewal that reached an expired manifest would bring the conversation back. If the manifest write loses a
+    /// race or fails after chunks were rewritten, the chunks the current manifest no longer references (deleted by a
+    /// concurrent delete or fold while they were being rewritten) are deleted again. Best effort throughout: a
+    /// failure is logged and leaves the load as it was.
+    /// </remarks>
     private async Task RenewTtlAsync(
         string key, string conversationId, ConversationManifest live, string? etag, CancellationToken cancellationToken)
     {
@@ -712,16 +720,19 @@ internal sealed partial class DaprConversationStore : IConversationStore
             return;
         }
 
+        var ttlMs = (long)ttl.TotalMilliseconds;
+        var lastWritten = live.ModifiedMs;
         var now = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
-        var half = (long)ttl.TotalMilliseconds / 2;
-        if (now - live.ModifiedMs < half)
+        if (now - lastWritten < ttlMs / 2 || !SafeToRenew(now))
         {
             return;
         }
 
+        var refreshed = false;
+        var renewed = false;
         try
         {
-            if (live.Chunks.Count > 0 && (live.ChunkTtlSeconds != ChunkTtlSeconds || now - live.ChunksWrittenMs >= half))
+            if (live.Chunks.Count > 0 && (live.ChunkTtlSeconds != ChunkTtlSeconds || now - live.ChunksWrittenMs >= ttlMs / 2))
             {
                 if (!await RefreshChunksAsync(key, live.Chunks, ChunkTtlSeconds, cancellationToken).ConfigureAwait(false))
                 {
@@ -729,16 +740,72 @@ internal sealed partial class DaprConversationStore : IConversationStore
                     return;
                 }
 
-                live.ChunksWrittenMs = now;
-                live.ChunkTtlSeconds = ChunkTtlSeconds;
+                refreshed = true;
             }
 
-            live.ModifiedMs = Math.Max(now, live.ModifiedMs + 1);
-            var document = JsonSerializer.SerializeToElement(live, ConversationStoreJsonContext.Default.ConversationManifest);
-            if (await _backend.TrySaveAsync(key, document, etag, _options.TimeToLiveSeconds, cancellationToken).ConfigureAwait(false))
+            // The chunk writes took time: write the manifest only if it still cannot have expired.
+            now = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
+            if (!SafeToRenew(now))
+            {
+                return;
+            }
+
+            var renewal = JsonSerializer.Deserialize(
+                JsonSerializer.SerializeToElement(live, ConversationStoreJsonContext.Default.ConversationManifest),
+                ConversationStoreJsonContext.Default.ConversationManifest)!;
+            if (refreshed)
+            {
+                renewal.ChunksWrittenMs = now;
+                renewal.ChunkTtlSeconds = ChunkTtlSeconds;
+            }
+
+            renewal.ModifiedMs = Math.Max(now, lastWritten + 1);
+            var document = JsonSerializer.SerializeToElement(renewal, ConversationStoreJsonContext.Default.ConversationManifest);
+            renewed = await _backend.TrySaveAsync(key, document, etag, _options.TimeToLiveSeconds, cancellationToken).ConfigureAwait(false);
+            if (renewed)
             {
                 LogTtlRenewed(conversationId);
             }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogTtlRenewFailed(ex, conversationId);
+        }
+        finally
+        {
+            if (refreshed && !renewed)
+            {
+                await DeleteResurrectedChunksAsync(key, live.Chunks, conversationId).ConfigureAwait(false);
+            }
+        }
+
+        bool SafeToRenew(long at) => at - lastWritten < ttlMs - RenewalMargin(ttlMs);
+    }
+
+    /// <summary>
+    /// The last stretch before a manifest expires in which it is not renewed on read: a quarter of the TTL. It scales
+    /// with the TTL, so a renewal window (from half the TTL to three quarters) always exists.
+    /// </summary>
+    private static long RenewalMargin(long ttlMs) => ttlMs / 4;
+
+    /// <summary>
+    /// After a renewal rewrote chunks but did not commit its manifest: deletes those the current manifest does not
+    /// reference. A concurrent delete or fold had deleted them, and the rewrite brought them back. Nothing is deleted
+    /// when the manifest is absent, because a pending commit could still land on the missing key.
+    /// </summary>
+    private async Task DeleteResurrectedChunksAsync(string key, List<ChunkDescriptor> rewritten, string conversationId)
+    {
+        try
+        {
+            var (current, _) = await ReadManifestAsync(key, CancellationToken.None).ConfigureAwait(false);
+            if (current is null)
+            {
+                return;
+            }
+
+            var referenced = current.Chunks.Select(c => c.Id).ToHashSet(StringComparer.Ordinal);
+            await TryDeleteAsync(rewritten.Where(c => !referenced.Contains(c.Id)).Select(c => ChunkKey(key, c.Id)).ToList(),
+                CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
