@@ -189,6 +189,51 @@ var second = await context.RunAgentWithHistoryAsync(agent, "Now estimate it.", f
   text content. A session turn returns the text only, but its reasoning stays in the session
   history and is sent back on later turns.
 
+How the reasoning moves through a run (an IDesign call chain; the model behind it is in
+`docs/diagrams/reasoning`):
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"background": "#ffffff", "lineColor": "#000000", "textColor": "#000000", "primaryTextColor": "#000000", "edgeLabelBackground": "#ffffff"}}}%%
+%% Model reasoning in an agent run
+flowchart TD
+    subgraph canvas [" "]
+        CallerWorkflow["Caller<br/>Workflow"]:::client
+        AgentRunWorkflow["Agent Run<br/>Workflow"]:::manager
+        CallLLMActivity["Call LLM<br/>Activity"]:::engine
+        ChatClientAccess["Chat Client<br/>Access"]:::access
+        ExecuteToolActivity["Execute Tool<br/>Activity"]:::access
+        LLMProvider[("LLM Provider")]:::resource
+        CallerWorkflow --> AgentRunWorkflow
+        AgentRunWorkflow --> CallLLMActivity
+        AgentRunWorkflow --> ExecuteToolActivity
+        CallLLMActivity --> ChatClientAccess
+        ChatClientAccess --> LLMProvider
+    end
+    classDef client fill:#9BCB3C,stroke:#333,color:#000
+    classDef manager fill:#FFF200,stroke:#333,color:#000
+    classDef engine fill:#F8C33A,stroke:#333,color:#000
+    classDef access fill:#BCBEC0,stroke:#333,color:#000
+    classDef resource fill:#6CCFE0,stroke:#333,color:#000
+    classDef utility fill:#D69CC6,stroke:#333,color:#000
+    linkStyle default stroke:#000,stroke-width:1.5px
+    style canvas fill:#ffffff,stroke:#ffffff
+```
+
+1. The caller workflow runs the agent with the previous turn's `TurnMessages` as history.
+2. The agent run workflow calls the **Call LLM activity** once per loop iteration, with the
+   run's messages so far.
+3. The activity converts the messages for the chat client. It puts back, first in each
+   message, the reasoning whose `Source` is this agent and chat client key, and leaves out the
+   rest.
+4. The **chat client** calls the model, which returns text, tool calls and reasoning.
+5. The activity captures the reasoning, records its `Source`, and returns it with the text and
+   tool calls.
+6. The workflow keeps the reasoning on the assistant message. When the model asked for tools,
+   the **Execute Tool activity** runs each one and the loop goes back to step 2, so the next
+   call sees the reasoning behind its tool calls.
+7. When the model answers, the run returns its `AgentRunResult`: the `Response` starts with the
+   final reasoning, and `TurnMessages` carries every block, ready for the next turn's step 1.
+
 Reasoning goes back only to the agent that produced it (same agent name and chat client key),
 because a provider rejects another provider's signed or encrypted reasoning. History passed to a
 different agent keeps its text, tool calls and results, without the reasoning. Blocks that cannot
