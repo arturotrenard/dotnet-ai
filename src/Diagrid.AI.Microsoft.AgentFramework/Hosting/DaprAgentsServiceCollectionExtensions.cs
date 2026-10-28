@@ -60,7 +60,9 @@ public static class DaprAgentsServiceCollectionExtensions
         // unconditionally would silently override a client the host registered first (e.g. with
         // UseTimeout). Ours lifts the 100-second HttpClient.Timeout default to the maximum, because
         // CallLlmActivity applies the per-agent timeout from WithLlmTimeout(...) to each call.
-        if (!services.Any(d => d.ServiceType == typeof(DaprConversationClient)))
+        // Only an unkeyed registration counts: DaprChatClient resolves the unkeyed client, so a
+        // keyed one the host registered for its own use cannot stand in for it.
+        if (!services.Any(d => d.ServiceType == typeof(DaprConversationClient) && !d.IsKeyedService))
         {
             services.AddDaprConversationClient((_, clientBuilder) =>
                 clientBuilder.UseTimeout(LlmTimeoutRegistration.MaxTimeout));

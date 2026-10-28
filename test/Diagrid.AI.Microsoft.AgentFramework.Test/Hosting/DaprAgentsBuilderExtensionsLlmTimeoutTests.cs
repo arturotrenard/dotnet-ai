@@ -106,4 +106,19 @@ public sealed class DaprAgentsBuilderExtensionsLlmTimeoutTests
         provider.GetRequiredService<DaprConversationClient>();
         Assert.True(configured);
     }
+
+    [Fact]
+    public void AddDaprAgents_RegistersTheUnkeyedConversationClient_WhenTheHostRegisteredOnlyAKeyedOne()
+    {
+        // DaprChatClient resolves the unkeyed client, so a keyed one cannot satisfy it.
+        var services = new ServiceCollection();
+        services.AddKeyedSingleton<DaprConversationClient>("host-key", (_, _) => null!);
+
+        services.AddDaprAgents();
+
+        Assert.Single(services, d => d.ServiceType == typeof(DaprConversationClient) && !d.IsKeyedService);
+        Assert.Single(services, d => d.ServiceType == typeof(DaprConversationClient) && d.IsKeyedService);
+        using var provider = services.BuildServiceProvider();
+        Assert.NotNull(provider.GetRequiredService<DaprConversationClient>());
+    }
 }
