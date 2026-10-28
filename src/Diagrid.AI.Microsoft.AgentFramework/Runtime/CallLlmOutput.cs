@@ -32,4 +32,12 @@ internal sealed record CallLlmOutput
 
     /// <summary>Reasoning the model returned with this response, in order, or null if none.</summary>
     public List<WorkflowReasoningContent>? Reasoning { get; init; }
+
+    /// <summary>
+    /// The agent's reasoning replay setting, resolved when the call ran. Recorded in the output so
+    /// the workflow decides whether to keep <see cref="Reasoning"/> the same way on every replay.
+    /// <see langword="null"/> in outputs recorded before this existed, which means
+    /// <see cref="Abstractions.ReasoningReplay.AcrossTurns"/>.
+    /// </summary>
+    public Abstractions.ReasoningReplay? ReasoningReplay { get; init; }
 }

@@ -200,6 +200,113 @@ public static class DaprAgentsBuilderExtensions
     }
 
     // =========================================================================
+    // Model reasoning
+    //
+    // ChatOptions.Reasoning asks a reasoning model for an effort level. CallLlmActivity builds the
+    // ChatOptions for every LLM call itself, so the effort is registered here and resolved per call,
+    // like the LLM timeout. Reasoning the model returns is kept and sent back to it (see
+    // WorkflowChatMessage.Reasoning); WithReasoningReplay limits that where it costs too much.
+    // =========================================================================
+
+    /// <summary>
+    /// Sets the reasoning effort requested on every LLM call of any agent that has no effort of its own.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="effort">The reasoning effort, sent as <see cref="ChatOptions.Reasoning"/>.</param>
+    /// <param name="output">The reasoning output to request, or <see langword="null"/> for the provider's default.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// An agent's own <see cref="ChatOptions.Reasoning"/>, and <c>WithReasoning(agentName, ...)</c>,
+    /// take precedence. Chat clients that do not support reasoning options ignore it; the Dapr
+    /// Conversation API has no field for it today.
+    /// </remarks>
+    public static IAgentsBuilder WithReasoning(
+        this IAgentsBuilder builder,
+        ReasoningEffort effort,
+        ReasoningOutput? output = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ReasoningEffortRegistration.Validate(effort, output);
+
+        GetServices(builder).AddSingleton(new ReasoningEffortRegistration(null, effort, output));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Sets the reasoning effort requested on every LLM call of the named agent, overriding the
+    /// agent's own <see cref="ChatOptions.Reasoning"/> and the default set by
+    /// <see cref="WithReasoning(IAgentsBuilder, ReasoningEffort, ReasoningOutput?)"/>.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="agentName">The name of the agent the effort applies to.</param>
+    /// <param name="effort">The reasoning effort, sent as <see cref="ChatOptions.Reasoning"/>.</param>
+    /// <param name="output">The reasoning output to request, or <see langword="null"/> for the provider's default.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// Can be called before or after <c>WithAgent(...)</c> for the same agent name.
+    /// </remarks>
+    public static IAgentsBuilder WithReasoning(
+        this IAgentsBuilder builder,
+        string agentName,
+        ReasoningEffort effort,
+        ReasoningOutput? output = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
+        ReasoningEffortRegistration.Validate(effort, output);
+
+        GetServices(builder).AddSingleton(new ReasoningEffortRegistration(agentName, effort, output));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Sets how much earlier reasoning is sent back to the model, for every agent that has no setting
+    /// of its own. Defaults to <see cref="ReasoningReplay.AcrossTurns"/>.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="replay">How much reasoning to send back and keep.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// Sending reasoning back costs input tokens on every call, and keeping it makes the run's
+    /// messages, and the workflow payloads that carry them, larger.
+    /// <see cref="ReasoningReplay.WithinRun"/> keeps it out of the history passed between turns;
+    /// <see cref="ReasoningReplay.Off"/> keeps it out of the messages altogether.
+    /// </remarks>
+    public static IAgentsBuilder WithReasoningReplay(this IAgentsBuilder builder, ReasoningReplay replay)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ReasoningReplayRegistration.Validate(replay);
+
+        GetServices(builder).AddSingleton(new ReasoningReplayRegistration(null, replay));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Sets how much earlier reasoning is sent back to the model for the named agent, overriding the
+    /// default set by <see cref="WithReasoningReplay(IAgentsBuilder, ReasoningReplay)"/>.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="agentName">The name of the agent the setting applies to.</param>
+    /// <param name="replay">How much reasoning to send back and keep.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// Can be called before or after <c>WithAgent(...)</c> for the same agent name.
+    /// </remarks>
+    public static IAgentsBuilder WithReasoningReplay(this IAgentsBuilder builder, string agentName, ReasoningReplay replay)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
+        ReasoningReplayRegistration.Validate(replay);
+
+        GetServices(builder).AddSingleton(new ReasoningReplayRegistration(agentName, replay));
+
+        return builder;
+    }
+
+    // =========================================================================
     // Binary store payloads
     //
     // Every agent turn carries the whole conversation across activity boundaries (CallLlmInput,
@@ -313,7 +420,15 @@ public static class DaprAgentsBuilderExtensions
         return builder.WithAgent(new AgentFactoryRegistration(sp =>
         {
             var chatClient = sp.GetRequiredKeyedService<IChatClient>(conversationComponentName);
-            return factory(chatClient);
+            var agent = factory(chatClient);
+
+            // Registered under the explicit name, which is what CallLlmActivity looks the agent up by.
+            if (agent is ChatClientAgent cca)
+            {
+                RegisterAgentComponents(sp, agent, DaprAgentsBuilder.UnwrapFunctionInvoking(cca.ChatClient), agentName);
+            }
+
+            return agent;
         })
         {
             Name = agentName,
@@ -569,27 +684,34 @@ public static class DaprAgentsBuilderExtensions
     /// Uses <see cref="DaprAgentsBuilder.GetAgentChatOptions"/> (backed by
     /// <c>[UnsafeAccessor]</c>) for AOT-safe access to the internal ChatOptions property.
     /// </summary>
-    internal static void RegisterAgentComponents(IServiceProvider sp, AIAgent agent, IChatClient rawChatClient)
+    internal static void RegisterAgentComponents(
+        IServiceProvider sp,
+        AIAgent agent,
+        IChatClient rawChatClient,
+        string? registeredName = null)
     {
-        var agentName = agent.Name;
+        var agentName = registeredName ?? agent.Name;
         if (string.IsNullOrWhiteSpace(agentName))
             return;
 
         string? instructions = null;
         IList<AITool>? tools = null;
         IReadOnlyList<AIContextProvider>? contextProviders = null;
+        ChatOptions? baseOptions = null;
 
         if (agent is ChatClientAgent cca)
         {
             instructions = cca.Instructions;
-            tools = DaprAgentsBuilder.GetAgentChatOptions(cca)?.Tools;
+            var agentOptions = DaprAgentsBuilder.GetAgentChatOptions(cca);
+            tools = agentOptions?.Tools;
+            baseOptions = ToBaseOptions(agentOptions);
             // Picks up AIContextProviders set via ChatClientAgentOptions (e.g. an MAF
             // AgentSkillsProvider) with no extra API needed for this (generic factory) path.
             contextProviders = cca.AIContextProviders is { Count: > 0 } ? cca.AIContextProviders : null;
         }
 
         var chatClientRegistry = sp.GetRequiredService<ChatClientRegistry>();
-        chatClientRegistry.Register(agentName, WrapIfNeeded(rawChatClient), instructions, tools, contextProviders);
+        chatClientRegistry.Register(agentName, WrapIfNeeded(rawChatClient), instructions, tools, contextProviders, baseOptions);
 
         var toolRegistry = sp.GetRequiredService<ToolRegistry>();
         if (tools is { Count: > 0 })
@@ -602,6 +724,32 @@ public static class DaprAgentsBuilderExtensions
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// The agent's own <see cref="ChatOptions"/> that <see cref="CallLlmActivity"/> starts every LLM
+    /// call from (temperature, output limits, reasoning, ...), without what it supplies itself or
+    /// cannot honour: the tools are merged per call, the instructions are sent as the system
+    /// message, a server-side conversation id would make the provider see the conversation twice,
+    /// and the workflow neither polls background responses nor resumes from a continuation token,
+    /// so those are left to the run's own <see cref="AgentRunOptions"/>.
+    /// </summary>
+    private static ChatOptions? ToBaseOptions(ChatOptions? agentOptions)
+    {
+        if (agentOptions is null)
+        {
+            return null;
+        }
+
+        var baseOptions = agentOptions.Clone();
+        baseOptions.Tools = null;
+        baseOptions.Instructions = null;
+        baseOptions.ConversationId = null;
+#pragma warning disable MEAI001
+        baseOptions.AllowBackgroundResponses = null;
+        baseOptions.ContinuationToken = null;
+#pragma warning restore MEAI001
+        return baseOptions;
     }
 
     /// <summary>

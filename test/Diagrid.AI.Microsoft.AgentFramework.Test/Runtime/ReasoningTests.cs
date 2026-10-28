@@ -83,13 +83,14 @@ public sealed class ReasoningTests
     }
 
     [Fact]
-    public async Task CallLlm_ReasoningWhoseProviderItemHasAnId_IsKeptButNotReplayable()
+    public async Task CallLlm_OpenAIResponsesReasoningItem_IsKeptButNotReplayable()
     {
         var (activity, client) = BuildActivity();
         client.SetNextResponse(new ChatResponse(new ChatMessage(ChatRole.Assistant,
         [
-            // Stands in for an OpenAI Responses ReasoningResponseItem, whose rs_ id cannot be rebuilt.
-            new TextReasoningContent("summary") { RawRepresentation = new ProviderItem("rs_123") },
+            // The rs_ id of an OpenAI Responses reasoning item lives only in this object, which does
+            // not survive the workflow, and a rebuilt item without it is rejected.
+            new TextReasoningContent("summary") { RawRepresentation = CreateOpenAIReasoningItem() },
             new TextContent("answer")
         ])));
 
@@ -98,6 +99,23 @@ public sealed class ReasoningTests
         var block = Assert.Single(output.Reasoning!);
         Assert.Equal("summary", block.Text);
         Assert.Null(block.Source);
+    }
+
+    [Fact]
+    public async Task CallLlm_OtherRawRepresentationWithAnId_IsStillReplayable()
+    {
+        // Any other provider object, even one with an Id (e.g. a whole chat completion), does not stop
+        // the reasoning from being sent back.
+        var (activity, client) = BuildActivity();
+        client.SetNextResponse(new ChatResponse(new ChatMessage(ChatRole.Assistant,
+        [
+            new TextReasoningContent("thought") { RawRepresentation = new ProviderItem("chatcmpl-123") },
+            new TextContent("answer")
+        ])));
+
+        var output = await activity.RunAsync(MakeContext(), UserInput("question"));
+
+        Assert.Equal(AgentName, Assert.Single(output.Reasoning!).Source);
     }
 
     [Fact]
@@ -409,6 +427,11 @@ public sealed class ReasoningTests
         });
 
     private sealed record ProviderItem(string Id);
+
+    // The real OpenAI SDK type, so a rename there fails this test instead of silently replaying.
+#pragma warning disable OPENAI001
+    private static object CreateOpenAIReasoningItem() => new OpenAI.Responses.ReasoningResponseItem("summary");
+#pragma warning restore OPENAI001
 
     private sealed class EmptyServiceProvider : IServiceProvider
     {

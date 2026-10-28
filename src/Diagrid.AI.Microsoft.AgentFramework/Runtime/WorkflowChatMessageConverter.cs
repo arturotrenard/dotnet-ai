@@ -10,7 +10,6 @@
 // On the Change Date, this software will be available under
 // the Apache License, Version 2.0.
 
-using System.Reflection;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
@@ -188,16 +187,28 @@ internal static class WorkflowChatMessageConverter
     /// Only the text and <see cref="TextReasoningContent.ProtectedData"/> survive the workflow, not the
     /// provider's own object (<see cref="AIContent.RawRepresentation"/>). Two kinds of block need more:
     /// a block with no text (Anthropic <c>redacted_thinking</c>, OpenAI encrypted reasoning without a
-    /// summary) would come back as an ordinary thinking block, and a block whose provider item has an
-    /// id (OpenAI Responses <c>rs_…</c> reasoning items) would come back without it. Providers reject
-    /// both, so those blocks are kept for the caller but not sent back.
+    /// summary) would come back as an ordinary thinking block, and an OpenAI Responses reasoning item
+    /// would come back without its <c>rs_…</c> id. Providers reject both, so those blocks are kept for
+    /// the caller but not sent back. The OpenAI type is matched by name, so this library does not
+    /// depend on the OpenAI package.
     /// </remarks>
     private static bool CanReplay(TextReasoningContent content) =>
-        !string.IsNullOrEmpty(content.Text) && !HasProviderItemId(content.RawRepresentation);
+        !string.IsNullOrEmpty(content.Text) && !IsOpenAIResponsesReasoningItem(content.RawRepresentation);
 
-    private static bool HasProviderItemId(object? rawRepresentation) =>
-        rawRepresentation?.GetType().GetProperty("Id", BindingFlags.Public | BindingFlags.Instance)?.GetValue(rawRepresentation)
-            is string { Length: > 0 };
+    private const string OpenAIResponsesReasoningItemType = "OpenAI.Responses.ReasoningResponseItem";
+
+    private static bool IsOpenAIResponsesReasoningItem(object? rawRepresentation)
+    {
+        for (var type = rawRepresentation?.GetType(); type is not null; type = type.BaseType)
+        {
+            if (type.FullName == OpenAIResponsesReasoningItemType)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Creates the assistant <see cref="ChatMessage"/> returned to callers: the reasoning blocks, then the text.

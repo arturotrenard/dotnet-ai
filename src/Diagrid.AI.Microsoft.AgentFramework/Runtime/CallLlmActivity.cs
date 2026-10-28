@@ -12,6 +12,7 @@
 
 using System.Text.Json;
 using Dapr.Workflow;
+using Diagrid.AI.Microsoft.AgentFramework.Abstractions;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
@@ -35,8 +36,11 @@ internal sealed partial class CallLlmActivity(
     AgentRegistry agentRegistry,
     IServiceProvider serviceProvider,
     ILogger<CallLlmActivity> logger,
-    IEnumerable<LlmTimeoutRegistration>? llmTimeouts = null) : WorkflowActivity<CallLlmInput, CallLlmOutput>
+    IEnumerable<LlmTimeoutRegistration>? llmTimeouts = null,
+    IEnumerable<ReasoningEffortRegistration>? reasoningEfforts = null,
+    IEnumerable<ReasoningReplayRegistration>? reasoningReplays = null) : WorkflowActivity<CallLlmInput, CallLlmOutput>
 {
+
     /// <inheritdoc />
     public override async Task<CallLlmOutput> RunAsync(WorkflowActivityContext context, CallLlmInput input)
     {
@@ -71,14 +75,19 @@ internal sealed partial class CallLlmActivity(
         try
         {
             var reasoningSource = WorkflowChatMessageConverter.GetReasoningSource(input.AgentName, input.ChatClientKey);
-            var messages = BuildChatMessages(config.Instructions, input.AdditionalInstructions, input.AdditionalMessages, input.Messages, reasoningSource);
+            var replay = ReasoningReplayRegistration.Resolve(reasoningReplays ?? [], input.AgentName);
+            var messages = BuildChatMessages(config.Instructions, input.AdditionalInstructions, input.AdditionalMessages,
+                input.Messages, reasoningSource, replay, input.RunMessagesStart ?? 0);
             var additionalTools = ResolveAdditionalTools(input.AgentName, input.AdditionalToolNames);
-            var options = BuildChatOptions(config.Tools, additionalTools, input.Options);
+            var reasoning = ReasoningEffortRegistration.Resolve(reasoningEfforts ?? [], input.AgentName, config.BaseOptions?.Reasoning);
+            WarnIfEffortIgnored(input.AgentName, config.ChatClient, reasoning);
+            var options = BuildChatOptions(config.BaseOptions, config.Tools, additionalTools, input.Options, reasoning,
+                isFollowUpCall: input.Iteration > 0);
 
             var response = await config.ChatClient.GetResponseAsync(messages, options, timeoutCts.Token)
                 .ConfigureAwait(false);
 
-            return ParseResponse(response, reasoningSource);
+            return ParseResponse(response, reasoningSource) with { ReasoningReplay = replay };
         }
         // A cancelled gRPC call surfaces as RpcException(Cancelled), not OperationCanceledException,
         // so the token's own state is what tells a timeout apart from any other failure.
@@ -101,7 +110,9 @@ internal sealed partial class CallLlmActivity(
         string? additionalInstructions,
         List<WorkflowChatMessage>? additionalMessages,
         List<WorkflowChatMessage> messages,
-        string reasoningSource)
+        string reasoningSource,
+        ReasoningReplay replay,
+        int runMessagesStart)
     {
         var chatMessages = new List<ChatMessage>();
 
@@ -121,10 +132,17 @@ internal sealed partial class CallLlmActivity(
             }
         }
 
-        // Reasoning this agent produced earlier, in this run or a prior turn, goes back to the model.
-        foreach (var msg in messages)
+        // Reasoning this agent produced earlier goes back to the model: from prior turns too with
+        // AcrossTurns, from this run only with WithinRun, and never with Off.
+        for (var i = 0; i < messages.Count; i++)
         {
-            chatMessages.Add(WorkflowChatMessageConverter.ToChatMessage(msg, reasoningSource));
+            var sendReasoning = replay switch
+            {
+                ReasoningReplay.Off => false,
+                ReasoningReplay.WithinRun => i >= runMessagesStart,
+                _ => true
+            };
+            chatMessages.Add(WorkflowChatMessageConverter.ToChatMessage(messages[i], sendReasoning ? reasoningSource : null));
         }
 
         return chatMessages;
@@ -172,27 +190,108 @@ internal sealed partial class CallLlmActivity(
         return resolved;
     }
 
+    /// <summary>
+    /// Builds the options for one LLM call: the agent's own <see cref="ChatOptions"/> (temperature,
+    /// output limits, ...), the resolved reasoning effort, the run's options where it sets them, and
+    /// the agent's tools plus those its context providers contributed.
+    /// </summary>
     private static ChatOptions? BuildChatOptions(
+        ChatOptions? baseOptions,
         IList<AITool>? tools,
         IReadOnlyList<AITool>? additionalTools,
-        AgentRunOptions? agentRunOptions)
+        AgentRunOptions? agentRunOptions,
+        ReasoningOptions? reasoning,
+        bool isFollowUpCall)
     {
         var combinedTools = CombineTools(tools, additionalTools);
-        if (combinedTools is null && agentRunOptions is null)
+        if (baseOptions is null && combinedTools is null && agentRunOptions is null && reasoning is null)
         {
             return null;
         }
 
-#pragma warning disable MEAI001
-        return new ChatOptions
+        // Cloned per call: the registered options are shared by every call of the agent.
+        var options = baseOptions?.Clone() ?? new ChatOptions();
+        options.Reasoning = reasoning;
+        options.Tools = combinedTools;
+
+        if (isFollowUpCall && options.ToolMode is RequiredChatToolMode)
         {
-            AllowBackgroundResponses = agentRunOptions?.AllowBackgroundResponses,
-            AdditionalProperties = agentRunOptions?.AdditionalProperties,
-            ContinuationToken = agentRunOptions?.ContinuationToken,
-            ResponseFormat = agentRunOptions?.ResponseFormat,
-            Tools = combinedTools
-        };
+            options.ToolMode = null;
+        }
+
+        if (agentRunOptions is not null)
+        {
+#pragma warning disable MEAI001
+            // The run overrides only what it sets, so an agent's own ResponseFormat is not erased.
+            options.AllowBackgroundResponses = agentRunOptions.AllowBackgroundResponses ?? options.AllowBackgroundResponses;
+            options.ContinuationToken = agentRunOptions.ContinuationToken ?? options.ContinuationToken;
 #pragma warning restore MEAI001
+            options.ResponseFormat = agentRunOptions.ResponseFormat ?? options.ResponseFormat;
+            options.AdditionalProperties = MergeAdditionalProperties(options.AdditionalProperties, agentRunOptions.AdditionalProperties);
+        }
+
+        return options;
+    }
+
+    private static AdditionalPropertiesDictionary? MergeAdditionalProperties(
+        AdditionalPropertiesDictionary? agentProperties,
+        AdditionalPropertiesDictionary? runProperties)
+    {
+        if (agentProperties is not { Count: > 0 })
+        {
+            return runProperties;
+        }
+
+        if (runProperties is not { Count: > 0 })
+        {
+            return agentProperties;
+        }
+
+        var merged = new AdditionalPropertiesDictionary(agentProperties);
+        foreach (var (key, value) in runProperties)
+        {
+            merged[key] = value;
+        }
+
+        return merged;
+    }
+
+    /// <summary>
+    /// Warns, once per agent, when the agent asks for a reasoning effort its chat client cannot send:
+    /// Dapr Conversation (<c>DaprChatClient</c>) has no field for it today.
+    /// </summary>
+    private void WarnIfEffortIgnored(string agentName, IChatClient chatClient, ReasoningOptions? reasoning)
+    {
+        if (reasoning?.Effort is null
+            || !IsDaprChatClient(chatClient)
+            || !chatClientRegistry.WarnedIgnoredReasoningEffort.TryAdd(agentName, true))
+        {
+            return;
+        }
+
+        LogReasoningEffortIgnored(agentName);
+    }
+
+    /// <summary>Whether <paramref name="chatClient"/> is, or wraps at any depth, a <c>DaprChatClient</c>.</summary>
+    private static bool IsDaprChatClient(IChatClient chatClient)
+    {
+        var seen = new HashSet<IChatClient>(ReferenceEqualityComparer.Instance);
+        for (IChatClient? client = chatClient; client is not null && seen.Add(client);)
+        {
+            if (client.GetType().Name == "DaprChatClient")
+            {
+                return true;
+            }
+
+            client = client switch
+            {
+                ToolResultCompatibilityChatClient wrapper => wrapper.InnerClient,
+                DelegatingChatClient delegating => Hosting.DaprAgentsBuilder.GetDelegatingInnerClient(delegating),
+                _ => null
+            };
+        }
+
+        return false;
     }
 
     private static List<AITool>? CombineTools(IList<AITool>? tools, IReadOnlyList<AITool>? additionalTools)
@@ -256,6 +355,9 @@ internal sealed partial class CallLlmActivity(
 
     [LoggerMessage(LogLevel.Error, "LLM call failed for agent '{AgentName}': {ErrorMessage}")]
     private partial void LogLlmCallError(string agentName, string errorMessage);
+
+    [LoggerMessage(LogLevel.Warning, "Agent '{AgentName}' has a reasoning effort, but its chat client is DaprChatClient, which does not send it: the Dapr Conversation API has no field for it")]
+    private partial void LogReasoningEffortIgnored(string agentName);
 
     [LoggerMessage(LogLevel.Error, "LLM call for agent '{AgentName}' timed out after {Timeout}")]
     private partial void LogLlmCallTimeout(string agentName, TimeSpan timeout);
