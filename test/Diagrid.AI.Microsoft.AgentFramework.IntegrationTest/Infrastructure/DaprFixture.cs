@@ -209,6 +209,7 @@ public sealed class DaprFixture : IAsyncLifetime
                 {
                     // Custom workflows for WorkflowContextExtensions integration tests.
                     reg.RegisterWorkflow<EchoOrchestrationWorkflow>();
+                    reg.RegisterWorkflow<ReasoningHistoryOrchestrationWorkflow>();
                     reg.RegisterWorkflow<CapitalOrchestrationWorkflow>();
                     reg.RegisterWorkflow<KeyedOrchestrationWorkflow>();
                 })
@@ -269,6 +270,12 @@ public sealed class DaprFixture : IAsyncLifetime
                         name: "ToolInvocationAgent",
                         tools: [processInputTool]);
             })
+            // --- Reasoning test agent: returns reasoning and reports which earlier reasoning it received ---
+            .WithAgent(_ => new ReasoningMockChatClient()
+                .AsAIAgent(
+                    instructions: "Reasoning agent",
+                    name: ReasoningMockChatClient.AgentName,
+                    tools: [AIFunctionFactory.Create(() => "noted", ReasoningMockChatClient.ToolName, "Takes a note.")]))
             // --- Session history test agent: records the message count seen on each LLM call ---
             .WithAgent(_ => new MessageCountMockChatClient(historyRecorder)
                 .AsAIAgent(instructions: "History tracking agent", name: "HistoryAgent"))

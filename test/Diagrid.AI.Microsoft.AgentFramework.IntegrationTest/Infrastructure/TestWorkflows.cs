@@ -4,6 +4,7 @@
 
 using Dapr.Workflow;
 using Diagrid.AI.Microsoft.AgentFramework.Runtime;
+using Microsoft.Extensions.AI;
 
 namespace Diagrid.AI.Microsoft.AgentFramework.IntegrationTest.Infrastructure;
 
@@ -45,5 +46,29 @@ internal sealed class KeyedOrchestrationWorkflow : Workflow<string, string>
         var agent    = context.GetAgent("AlphaAgent", "chat-key-alpha");
         var response = await context.RunAgentAsync(agent, message: input);
         return response.Text ?? string.Empty;
+    }
+}
+
+/// <summary>
+/// Custom workflow that runs <see cref="ReasoningMockChatClient.AgentName"/> for two turns with
+/// <see cref="WorkflowContextExtensions.RunAgentWithHistoryAsync"/>, passing the first turn's
+/// messages as the second turn's history. Returns
+/// <c>{turn 1 text}|{turn 2 text}|{reasoning on the turn 2 response}</c>.
+/// </summary>
+internal sealed class ReasoningHistoryOrchestrationWorkflow : Workflow<string, string>
+{
+    public override async Task<string> RunAsync(WorkflowContext context, string input)
+    {
+        var agent = context.GetAgent(ReasoningMockChatClient.AgentName);
+
+        var first = await context.RunAgentWithHistoryAsync(agent, $"{input} (turn 1)");
+        var second = await context.RunAgentWithHistoryAsync(agent, $"{input} (turn 2)", first.TurnMessages);
+
+        var finalReasoning = second.Response.Messages
+            .SelectMany(m => m.Contents)
+            .OfType<TextReasoningContent>()
+            .Select(r => $"{r.Text}/{r.ProtectedData}");
+
+        return $"{first.Response.Text}|{second.Response.Text}|{string.Join(",", finalReasoning)}";
     }
 }

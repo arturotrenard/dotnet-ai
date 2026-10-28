@@ -99,4 +99,24 @@ public sealed class WorkflowContextExtensionsTests(DaprFixture fixture)
         Assert.Equal(WorkflowRuntimeStatus.Completed, state.RuntimeStatus);
         Assert.Equal("Alpha response", state.ReadOutputAs<string>());
     }
+
+    // ── Model reasoning ──────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task RunAgentWithHistoryAsync_ResendsReasoningWithinAndAcrossTurns()
+    {
+        var instanceId = await fixture.WorkflowClient.ScheduleNewWorkflowAsync(
+            name:  nameof(ReasoningHistoryOrchestrationWorkflow),
+            input: "reasoning");
+
+        var state = await fixture.WorkflowClient.WaitForWorkflowCompletionAsync(instanceId);
+
+        Assert.Equal(WorkflowRuntimeStatus.Completed, state.RuntimeStatus);
+        // Turn 1's second call saw the reasoning behind its tool call. Turn 2's second call saw both of
+        // turn 1's blocks (carried in TurnMessages through the workflow) plus its own tool-call reasoning.
+        // The turn 2 response carries its final reasoning, signature included.
+        Assert.Equal(
+            "seen:thought-1|seen:thought-1,thought-2,thought-3|thought-4/sig-4",
+            state.ReadOutputAs<string>());
+    }
 }
