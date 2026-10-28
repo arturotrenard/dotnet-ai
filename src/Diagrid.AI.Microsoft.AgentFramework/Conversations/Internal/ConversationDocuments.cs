@@ -55,6 +55,22 @@ internal sealed class ConversationManifest
     [JsonPropertyName("turns")]
     public List<TurnRecord> Turns { get; set; } = [];
 
+    /// <summary>
+    /// The most recent summaries, oldest first: where each summary entry is and how much of the conversation it
+    /// replaces. A load uses the latest one below its prefix.
+    /// </summary>
+    [JsonPropertyName("summaries")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<SummaryRecord>? Summaries { get; set; }
+
+    /// <summary>
+    /// The sequence of the newest summary record dropped from <see cref="Summaries"/>, or null if none was. A load
+    /// pinned to a prefix that used a dropped summary fails instead of quietly loading the full history.
+    /// </summary>
+    [JsonPropertyName("summaries_dropped_max")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? SummariesDroppedMax { get; set; }
+
     /// <summary>Unix milliseconds of the last commit; always increases.</summary>
     [JsonPropertyName("mtime")]
     public long ModifiedMs { get; set; }
@@ -82,6 +98,16 @@ internal sealed class ChunkDescriptor
 
     [JsonPropertyName("bytes")]
     public int Bytes { get; set; }
+}
+
+/// <summary>A summary entry: its sequence, and the entries below <see cref="CoversUpToSequence"/> it replaces.</summary>
+internal sealed class SummaryRecord
+{
+    [JsonPropertyName("seq")]
+    public long Sequence { get; set; }
+
+    [JsonPropertyName("covers")]
+    public long CoversUpToSequence { get; set; }
 }
 
 /// <summary>A committed turn, remembered so that appending it again changes nothing.</summary>
@@ -130,6 +156,10 @@ internal sealed class StoredConversationEntry
 
     [JsonPropertyName("created_ms")]
     public long CreatedMs { get; set; }
+
+    /// <summary>For a summary entry, the sequence below which it replaces the conversation; otherwise null.</summary>
+    [JsonPropertyName("summary_of")]
+    public long? SummaryOf { get; set; }
 
     [JsonPropertyName("message")]
     public StoredChatMessage Message { get; set; } = new();

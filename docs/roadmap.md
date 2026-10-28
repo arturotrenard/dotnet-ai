@@ -232,7 +232,8 @@ Actualizado el 2026-10-28: el razonamiento pasa adelante, porque es lo que neces
    - PR 3, el store (`WithConversationStore`, `IConversationStore`). PR #8 en el fork.
    - PR 4, correr agentes contra una conversación guardada (`RunAgentInConversationAsync`, `AttachConversation`). PR #9 en el fork.
    - PR 5, `SessionWorkflow` respaldado por el store (`CreateStoredSessionAsync`). En curso.
-   - Después, según se necesite: reductor o ventana de turnos sobre el historial cargado, caché de chunks, `ContinueAsNew` en `SessionWorkflow`.
+   - PR 6, tope de contexto (`WithContextWindow`) y compactación persistida en el store (`WithConversationCompaction`). dapr-agents no tiene ninguna de las dos: manda todo el historial y, si se pasa del contexto, reintenta el mismo prompt. En curso.
+   - Después, según se necesite: caché de chunks, `ContinueAsNew` en `SessionWorkflow`, conteo real de tokens con el uso que reporta el proveedor.
 3. Cliente directo a Ollama en team_learning_agents y bake-off de esfuerzo.
 4. **#1:** reintentos durables.
 5. **#2:** `MaxIterations` configurable y la señal de agotamiento.

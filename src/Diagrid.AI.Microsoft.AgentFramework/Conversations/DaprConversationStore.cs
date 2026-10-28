@@ -129,7 +129,18 @@ internal sealed partial class DaprConversationStore : IConversationStore
                 return new ConversationSnapshot(0, [], live.Incarnation);
             }
 
-            var needed = live.Chunks.Where(c => c.FirstSequence < upTo).ToList();
+            // The latest summary inside the prefix stands for everything below what it covers. A prefix pinned
+            // before a summary was appended never includes it, so a run's history does not change mid-run.
+            var summary = live.Summaries?.Where(r => r.Sequence < upTo).MaxBy(r => r.Sequence);
+            if (summary is null && live.SummariesDroppedMax < upTo)
+            {
+                throw new ConversationNotFoundException(conversationId,
+                    $"Conversation '{conversationId}' was compacted too many times since this history was first read; the summary it used is gone.");
+            }
+
+            var from = summary?.CoversUpToSequence ?? 0;
+
+            var needed = live.Chunks.Where(c => c.FirstSequence < upTo && c.FirstSequence + c.Count > from).ToList();
             var keys = needed.Select(c => ChunkKey(key, c.Id)).ToList();
             var documents = await _backend.GetBulkAsync(keys, cancellationToken).ConfigureAwait(false);
             if (keys.Any(k => !documents.ContainsKey(k)))
@@ -139,33 +150,49 @@ internal sealed partial class DaprConversationStore : IConversationStore
                 continue;
             }
 
-            var entries = new List<ConversationEntry>((int)Math.Min(upTo, int.MaxValue));
+            var range = new List<StoredConversationEntry>((int)Math.Min(upTo - from, int.MaxValue));
             foreach (var chunkKey in keys)
             {
                 foreach (var stored in ReadChunk(documents[chunkKey], chunkKey).Entries)
                 {
-                    if (stored.Sequence < upTo)
+                    if (stored.Sequence >= from && stored.Sequence < upTo)
                     {
-                        entries.Add(ToEntry(stored));
+                        range.Add(stored);
                     }
                 }
             }
 
-            entries.Sort((a, b) => a.Sequence.CompareTo(b.Sequence));
-            for (var i = 0; i < entries.Count; i++)
+            range.Sort((x, y) => x.Sequence.CompareTo(y.Sequence));
+            for (var i = 0; i < range.Count; i++)
             {
-                if (entries[i].Sequence != i)
+                if (range[i].Sequence != from + i)
                 {
                     throw new ConversationStoreException(
-                        $"Conversation '{conversationId}' is corrupt: expected entry {i}, found {entries[i].Sequence}.");
+                        $"Conversation '{conversationId}' is corrupt: expected entry {from + i}, found {range[i].Sequence}.");
                 }
             }
 
-            if (entries.Count != upTo)
+            if (range.Count != upTo - from)
             {
                 throw new ConversationStoreException(
-                    $"Conversation '{conversationId}' is corrupt: expected {upTo} entries, found {entries.Count}.");
+                    $"Conversation '{conversationId}' is corrupt: expected {upTo - from} entries, found {range.Count}.");
             }
+
+            var entries = new List<ConversationEntry>(range.Count);
+            if (summary is not null)
+            {
+                var summaryEntry = range.Find(e => e.Sequence == summary.Sequence);
+                if (summaryEntry?.SummaryOf is null)
+                {
+                    throw new ConversationStoreException(
+                        $"Conversation '{conversationId}' is corrupt: entry {summary.Sequence} is not the summary its manifest lists.");
+                }
+
+                entries.Add(ToEntry(summaryEntry));
+            }
+
+            // Older summaries are superseded by the one above (or by the full history when there is none).
+            entries.AddRange(range.Where(e => e.SummaryOf is null).Select(ToEntry));
 
             return new ConversationSnapshot(upTo, entries, live.Incarnation);
         }
@@ -175,8 +202,76 @@ internal sealed partial class DaprConversationStore : IConversationStore
     }
 
     /// <inheritdoc />
-    public async Task<ConversationAppendResult> AppendTurnAsync(
-        ConversationTurn turn, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<ConversationEntry>> LoadEntriesAsync(
+        string conversationId, long fromSequence, long? toSequence = null, CancellationToken cancellationToken = default)
+    {
+        var key = ManifestKey(conversationId);
+        if (fromSequence < 0 || toSequence < fromSequence)
+        {
+            throw new ArgumentOutOfRangeException(nameof(fromSequence), fromSequence, "The range is not valid.");
+        }
+
+        for (var attempt = 1; attempt <= MaxLoadAttempts; attempt++)
+        {
+            var (manifest, _) = await ReadManifestAsync(key, cancellationToken).ConfigureAwait(false);
+            if (manifest is not { Deleted: false } live)
+            {
+                return [];
+            }
+
+            var to = Math.Min(toSequence ?? live.NextSequence, live.NextSequence);
+            if (to <= fromSequence)
+            {
+                return [];
+            }
+
+            var keys = live.Chunks
+                .Where(c => c.FirstSequence < to && c.FirstSequence + c.Count > fromSequence)
+                .Select(c => ChunkKey(key, c.Id))
+                .ToList();
+            var documents = await _backend.GetBulkAsync(keys, cancellationToken).ConfigureAwait(false);
+            if (keys.Any(k => !documents.ContainsKey(k)))
+            {
+                LogChunkMissingOnLoad(conversationId, attempt);
+                continue;
+            }
+
+            return keys
+                .SelectMany(k => ReadChunk(documents[k], k).Entries)
+                .Where(e => e.Sequence >= fromSequence && e.Sequence < to)
+                .OrderBy(e => e.Sequence)
+                .Select(ToEntry)
+                .ToList();
+        }
+
+        throw new ConversationStoreException(
+            $"Could not load conversation '{conversationId}': a chunk it references was still missing after {MaxLoadAttempts} attempts.");
+    }
+
+    /// <inheritdoc />
+    public Task<ConversationAppendResult> AppendTurnAsync(
+        ConversationTurn turn, CancellationToken cancellationToken = default) =>
+        AppendCoreAsync(turn, summaryOf: null, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<ConversationAppendResult> AppendSummaryAsync(
+        ConversationSummary summary, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(summary);
+        ArgumentNullException.ThrowIfNull(summary.Message, nameof(summary));
+        if (summary.CoversUpToSequence <= 0)
+        {
+            throw new ArgumentException("A summary must cover at least one entry.", nameof(summary));
+        }
+
+        // A summary is a one-message turn; its sequence comes after everything it covers.
+        var turn = new ConversationTurn(summary.ConversationId, summary.SummaryId, summary.CoversUpToSequence,
+            summary.AgentName, summary.ChatClientKey, [summary.Message], summary.BaseIncarnation);
+        return AppendCoreAsync(turn, summary.CoversUpToSequence, cancellationToken);
+    }
+
+    private async Task<ConversationAppendResult> AppendCoreAsync(
+        ConversationTurn turn, long? summaryOf, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(turn);
         var key = ManifestKey(turn.ConversationId);
@@ -232,6 +327,12 @@ internal sealed partial class DaprConversationStore : IConversationStore
 
             var now = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
             var next = manifest?.NextSequence ?? 0;
+            if (summaryOf > next)
+            {
+                throw new ArgumentException(
+                    $"The summary covers {summaryOf} entries, but conversation '{turn.ConversationId}' has {next}.", nameof(turn));
+            }
+
             var incarnation = manifest?.Incarnation ?? Guid.NewGuid().ToString("N");
             var baseMoved = next != turn.BaseSequence;
             var entries = turn.Messages.Select((message, i) => new StoredConversationEntry
@@ -241,6 +342,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
                 AgentName = turn.AgentName,
                 ChatClientKey = turn.ChatClientKey,
                 CreatedMs = now,
+                SummaryOf = summaryOf,
                 Message = StoredChatMessage.From(message),
             }).ToList();
 
@@ -310,7 +412,13 @@ internal sealed partial class DaprConversationStore : IConversationStore
                 ChunksWrittenMs = chunksWrittenMs,
                 ChunkTtlSeconds = chunkTtl,
                 Incarnation = incarnation,
+                Summaries = manifest?.Summaries,
+                SummariesDroppedMax = manifest?.SummariesDroppedMax,
             };
+            if (summaryOf is { } covers)
+            {
+                AddSummary(updated, new SummaryRecord { Sequence = next, CoversUpToSequence = covers });
+            }
 
             var document = JsonSerializer.SerializeToElement(updated, ConversationStoreJsonContext.Default.ConversationManifest);
             bool? committed;
@@ -509,7 +617,8 @@ internal sealed partial class DaprConversationStore : IConversationStore
         stored.AgentName,
         stored.ChatClientKey,
         DateTimeOffset.FromUnixTimeMilliseconds(stored.CreatedMs),
-        stored.Message.ToWorkflowChatMessage());
+        stored.Message.ToWorkflowChatMessage(),
+        stored.SummaryOf);
 
     /// <summary>
     /// Splits entries into chunks greedily by serialized size. An entry larger than the limit gets a chunk of its own.
@@ -603,6 +712,30 @@ internal sealed partial class DaprConversationStore : IConversationStore
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Records a summary, keeping the most recent ones. A load pinned to a prefix whose summary was dropped fails
+    /// (see <see cref="ConversationManifest.SummariesDroppedMax"/>); every other load still finds its summary.
+    /// </summary>
+    private static void AddSummary(ConversationManifest manifest, SummaryRecord added)
+    {
+        const int MaxSummaries = 32;
+        var all = new List<SummaryRecord>((manifest.Summaries?.Count ?? 0) + 1);
+        if (manifest.Summaries is not null)
+        {
+            all.AddRange(manifest.Summaries);
+        }
+
+        all.Add(added);
+        if (all.Count > MaxSummaries)
+        {
+            var dropped = all.Count - MaxSummaries;
+            manifest.SummariesDroppedMax = all.Take(dropped).Max(r => r.Sequence);
+            all = all.GetRange(dropped, MaxSummaries);
+        }
+
+        manifest.Summaries = all;
     }
 
     private List<TurnRecord> TrimTurns(List<TurnRecord>? turns, TurnRecord added)

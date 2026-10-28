@@ -364,6 +364,114 @@ public static class DaprAgentsBuilderExtensions
     }
 
     // =========================================================================
+    // Context window and conversation compaction
+    //
+    // WithContextWindow caps what each LLM call sends to what fits the model; it changes nothing that
+    // is stored. WithConversationCompaction summarizes a stored conversation's older turns once it grows,
+    // and saves the summary in the store, so it is computed once rather than on every call.
+    // =========================================================================
+
+    /// <summary>
+    /// Sets the context window of every agent's model, so each LLM call trims what came before the run to the room
+    /// the run leaves: older tool results are collapsed first, then the oldest messages are dropped. The stored
+    /// history is not changed.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="maxContextTokens">The model's context window, in tokens.</param>
+    /// <param name="maxOutputTokens">The tokens to keep free for the model's reply.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// Uses Microsoft Agent Framework's <c>ContextWindowCompactionStrategy</c>: above half of the input budget
+    /// (<paramref name="maxContextTokens"/> - <paramref name="maxOutputTokens"/>) it collapses older tool calls and
+    /// their results into short text, and above 80 % it drops the oldest message groups. System messages are always
+    /// kept, and a tool call is never separated from its results. The run's own messages are never trimmed, so a
+    /// single run larger than the window is still sent whole. Tokens are estimated as bytes / 4.
+    /// </remarks>
+    public static IAgentsBuilder WithContextWindow(this IAgentsBuilder builder, int maxContextTokens, int maxOutputTokens)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ContextWindowRegistration.Validate(maxContextTokens, maxOutputTokens);
+
+        GetServices(builder).AddSingleton(new ContextWindowRegistration(null, maxContextTokens, maxOutputTokens));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Sets the context window of the named agent's model, overriding the default set by
+    /// <see cref="WithContextWindow(IAgentsBuilder, int, int)"/>.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="agentName">The name of the agent.</param>
+    /// <param name="maxContextTokens">The model's context window, in tokens.</param>
+    /// <param name="maxOutputTokens">The tokens to keep free for the model's reply.</param>
+    /// <returns>The agents builder.</returns>
+    public static IAgentsBuilder WithContextWindow(
+        this IAgentsBuilder builder, string agentName, int maxContextTokens, int maxOutputTokens)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
+        ContextWindowRegistration.Validate(maxContextTokens, maxOutputTokens);
+
+        GetServices(builder).AddSingleton(new ContextWindowRegistration(agentName, maxContextTokens, maxOutputTokens));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Compacts every agent's stored conversations: once the history a run loads is estimated above
+    /// <see cref="ConversationCompactionOptions.TriggerTokens"/>, the turns before the most recent
+    /// <see cref="ConversationCompactionOptions.KeepRecentTurns"/> are summarized after the run, and later runs
+    /// load the summary in their place.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="configure">Sets the options; <see cref="ConversationCompactionOptions.TriggerTokens"/> is required.</param>
+    /// <returns>The agents builder.</returns>
+    /// <remarks>
+    /// Applies to runs against a stored conversation (<c>WithConversationStore(...)</c>). The summary is appended to
+    /// the conversation and the original messages stay stored. Compaction is best effort: if the summary call fails,
+    /// the run still succeeds and the next run tries again.
+    /// </remarks>
+    public static IAgentsBuilder WithConversationCompaction(
+        this IAgentsBuilder builder, Action<ConversationCompactionOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        GetServices(builder).AddSingleton(new ConversationCompactionRegistration(null, BuildCompactionOptions(configure)));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Compacts the named agent's stored conversations, overriding the default set by
+    /// <see cref="WithConversationCompaction(IAgentsBuilder, Action{ConversationCompactionOptions})"/>.
+    /// </summary>
+    /// <param name="builder">The agents builder.</param>
+    /// <param name="agentName">The name of the agent.</param>
+    /// <param name="configure">Sets the options; <see cref="ConversationCompactionOptions.TriggerTokens"/> is required.</param>
+    /// <returns>The agents builder.</returns>
+    public static IAgentsBuilder WithConversationCompaction(
+        this IAgentsBuilder builder, string agentName, Action<ConversationCompactionOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        GetServices(builder).AddSingleton(new ConversationCompactionRegistration(agentName, BuildCompactionOptions(configure)));
+
+        return builder;
+    }
+
+    private static ConversationCompactionOptions BuildCompactionOptions(Action<ConversationCompactionOptions> configure)
+    {
+        var options = new ConversationCompactionOptions();
+        configure(options);
+        options.Validate();
+        return options;
+    }
+
+    // =========================================================================
     // Binary store payloads
     //
     // Every agent turn carries the whole conversation across activity boundaries (CallLlmInput,
