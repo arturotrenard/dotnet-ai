@@ -27,7 +27,8 @@ namespace Diagrid.AI.Microsoft.AgentFramework.Conversations;
 /// <param name="Messages">The run's messages in order, starting with the user message.</param>
 /// <param name="BaseIncarnation">
 /// The <see cref="ConversationSnapshot.Incarnation"/> of the history the run was produced against, or
-/// <see langword="null"/> when it was empty. A different incarnation also counts as a moved base.
+/// <see langword="null"/> when it was empty. When set, the append fails with
+/// <see cref="ConversationNotFoundException"/> if that conversation was deleted or expired since.
 /// </param>
 public sealed record ConversationTurn(
     string ConversationId,
@@ -47,19 +48,52 @@ public sealed record ConversationTurn(
 /// <param name="ChatClientKey">The chat client key the agent used, or <see langword="null"/>.</param>
 /// <param name="CreatedAt">When the turn was committed.</param>
 /// <param name="Message">The message.</param>
+/// <param name="SummaryOf">
+/// For a summary (see <see cref="IConversationStore.AppendSummaryAsync"/>), the sequence below which it replaces
+/// the conversation; <see langword="null"/> for an ordinary message.
+/// </param>
 public sealed record ConversationEntry(
     long Sequence,
     string TurnId,
     string AgentName,
     string? ChatClientKey,
     DateTimeOffset CreatedAt,
-    WorkflowChatMessage Message);
+    WorkflowChatMessage Message,
+    long? SummaryOf = null);
+
+/// <summary>
+/// A summary of the start of a conversation, which later loads return in place of the entries it covers.
+/// </summary>
+/// <param name="ConversationId">The conversation.</param>
+/// <param name="SummaryId">The idempotency key: appending the same id again changes nothing.</param>
+/// <param name="CoversUpToSequence">The summary replaces the entries below this sequence.</param>
+/// <param name="AgentName">The agent the summary was made for.</param>
+/// <param name="ChatClientKey">That agent's chat client key, or <see langword="null"/>.</param>
+/// <param name="Message">The summary message.</param>
+/// <param name="BaseIncarnation">
+/// The incarnation of the history that was summarized. The append fails with
+/// <see cref="ConversationNotFoundException"/> if that conversation was deleted or expired since.
+/// </param>
+public sealed record ConversationSummary(
+    string ConversationId,
+    string SummaryId,
+    long CoversUpToSequence,
+    string AgentName,
+    string? ChatClientKey,
+    WorkflowChatMessage Message,
+    string? BaseIncarnation);
 
 /// <summary>
 /// A prefix of a conversation's history.
 /// </summary>
-/// <param name="NextSequence">The sequence the next appended entry gets; also the number of entries.</param>
-/// <param name="Entries">The entries, ordered by <see cref="ConversationEntry.Sequence"/>.</param>
+/// <param name="NextSequence">
+/// The sequence the next appended entry gets. It equals the number of entries only while no summary applies.
+/// </param>
+/// <param name="Entries">
+/// The entries, ordered by <see cref="ConversationEntry.Sequence"/>. When the prefix holds a summary, it comes
+/// first and stands for every entry below its <see cref="ConversationEntry.SummaryOf"/>, which are left out, as
+/// are older summaries.
+/// </param>
 /// <param name="Incarnation">
 /// An id given to the conversation when it was created, or <see langword="null"/> when it does not exist.
 /// It changes when the conversation is deleted or expires and is created again under the same id.
@@ -89,7 +123,7 @@ public enum ConversationAppendStatus
 /// <param name="NextSequence">The conversation's next sequence right after the turn was committed.</param>
 /// <param name="BaseMoved">
 /// <see langword="true"/> when other turns were committed after <see cref="ConversationTurn.BaseSequence"/>,
-/// or the conversation was created again, so the turn was produced without seeing them.
+/// so the turn was produced without seeing them.
 /// </param>
 public sealed record ConversationAppendResult(
     ConversationAppendStatus Status,

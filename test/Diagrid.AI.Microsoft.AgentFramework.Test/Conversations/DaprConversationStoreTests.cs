@@ -914,20 +914,38 @@ public sealed class DaprConversationStoreTests
             ConversationId, 3, current.Incarnation, TestContext.Current.CancellationToken)).Entries.Count);
     }
 
-    [Fact]
-    public async Task Append_AgainstAnOlderIncarnation_ReportsBaseMoved()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Append_ProducedFromHistoryThatWasDeleted_IsNotStored(bool recreated)
     {
         var store = CreateStore();
         await store.AppendTurnAsync(Turn("t1", 0, User("a")), TestContext.Current.CancellationToken);
         var old = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
         await store.DeleteAsync(ConversationId, TestContext.Current.CancellationToken);
-        await store.AppendTurnAsync(Turn("t2", 0, User("b")), TestContext.Current.CancellationToken);
+        if (recreated)
+        {
+            await store.AppendTurnAsync(Turn("t2", 0, User("b")), TestContext.Current.CancellationToken);
+        }
+
+        var before = _backend.Keys.Order().ToList();
+        await Assert.ThrowsAsync<ConversationNotFoundException>(() => store.AppendTurnAsync(
+            Turn("t3", 1, User("c")) with { BaseIncarnation = old.Incarnation }, TestContext.Current.CancellationToken));
+
+        Assert.Equal(before, _backend.Keys.Order().ToList());
+    }
+
+    [Fact]
+    public async Task Append_WithTheCurrentIncarnation_IsStored()
+    {
+        var store = CreateStore();
+        await store.AppendTurnAsync(Turn("t1", 0, User("a")), TestContext.Current.CancellationToken);
+        var current = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
 
         var result = await store.AppendTurnAsync(
-            Turn("t3", 1, User("c")) with { BaseIncarnation = old.Incarnation }, TestContext.Current.CancellationToken);
+            Turn("t2", 1, User("b")) with { BaseIncarnation = current.Incarnation }, TestContext.Current.CancellationToken);
 
-        Assert.Equal(1, result.FirstSequence);
-        Assert.True(result.BaseMoved);
+        Assert.Equal(new ConversationAppendResult(ConversationAppendStatus.Appended, 1, 2, false), result);
     }
 
     [Fact]
@@ -1026,6 +1044,160 @@ public sealed class DaprConversationStoreTests
         var options = new DaprConversationStoreOptions { StateStoreName = "statestore", KeyPrefix = prefix };
 
         Assert.Equal(nameof(DaprConversationStoreOptions.KeyPrefix), Assert.Throws<ArgumentException>(options.Validate).ParamName);
+    }
+
+    // ── Summaries ──────────────────────────────────────────────────────────
+
+    private static ConversationSummary Summary(string id, long covers, string text, string? incarnation) =>
+        new(ConversationId, id, covers, "planner", null, new WorkflowChatMessage { Role = "system", Content = text }, incarnation);
+
+    [Fact]
+    public async Task Summary_ReplacesTheEntriesItCovers_InLaterLoads_AndKeepsThemStored()
+    {
+        var store = CreateStore();
+        await store.AppendTurnAsync(Turn("t1", 0, User("a"), Assistant("b")), TestContext.Current.CancellationToken);
+        await store.AppendTurnAsync(Turn("t2", 2, User("c"), Assistant("d")), TestContext.Current.CancellationToken);
+        var before = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        var result = await store.AppendSummaryAsync(Summary("s1", 2, "S1", before.Incarnation), TestContext.Current.CancellationToken);
+        await store.AppendTurnAsync(Turn("t3", 5, User("e")), TestContext.Current.CancellationToken);
+
+        Assert.Equal((ConversationAppendStatus.Appended, 4L, 5L), (result.Status, result.FirstSequence, result.NextSequence));
+        var after = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(6, after.NextSequence);
+        Assert.Equal(["S1", "c", "d", "e"], after.Entries.Select(e => e.Message.Content));
+        Assert.Equal((4L, (long?)2), (after.Entries[0].Sequence, after.Entries[0].SummaryOf));
+        Assert.All(after.Entries.Skip(1), e => Assert.Null(e.SummaryOf));
+
+        // A prefix pinned before the summary is unchanged.
+        var pinned = await store.LoadAsync(ConversationId, 4, before.Incarnation, TestContext.Current.CancellationToken);
+        Assert.Equal(["a", "b", "c", "d"], pinned.Entries.Select(e => e.Message.Content));
+    }
+
+    [Fact]
+    public async Task ALaterSummary_SupersedesTheEarlierOne()
+    {
+        var store = CreateStore();
+        await store.AppendTurnAsync(Turn("t1", 0, User("a")), TestContext.Current.CancellationToken);
+        await store.AppendTurnAsync(Turn("t2", 1, User("b")), TestContext.Current.CancellationToken);
+        var inc = (await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken)).Incarnation;
+        await store.AppendSummaryAsync(Summary("s1", 1, "S1", inc), TestContext.Current.CancellationToken);   // seq 2
+        await store.AppendTurnAsync(Turn("t3", 3, User("c")), TestContext.Current.CancellationToken);          // seq 3
+        await store.AppendSummaryAsync(Summary("s2", 3, "S2", inc), TestContext.Current.CancellationToken);   // seq 4
+        await store.AppendTurnAsync(Turn("t4", 5, User("d")), TestContext.Current.CancellationToken);          // seq 5
+
+        var loaded = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(["S2", "c", "d"], loaded.Entries.Select(e => e.Message.Content));
+
+        // A prefix that ends before the second summary uses the first one, without the second.
+        var older = await store.LoadAsync(ConversationId, 4, inc, TestContext.Current.CancellationToken);
+        Assert.Equal(["S1", "b", "c"], older.Entries.Select(e => e.Message.Content));
+    }
+
+    [Fact]
+    public async Task SummarizedLoad_ReadsOnlyTheChunksFromWhatTheSummaryCovers()
+    {
+        var store = CreateStore(o => o.MaxChunkBytes = 200);
+        var big = new string('x', 150);
+        for (var i = 0; i < 4; i++)
+        {
+            await store.AppendTurnAsync(Turn($"t{i}", i, User(big + i)), TestContext.Current.CancellationToken);
+        }
+
+        var inc = (await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken)).Incarnation;
+        await store.AppendSummaryAsync(Summary("s1", 3, "S", inc), TestContext.Current.CancellationToken);
+
+        IReadOnlyList<string>? requested = null;
+        _backend.BeforeGetBulk = keys => requested = keys;
+        var loaded = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(["S", big + 3], loaded.Entries.Select(e => e.Message.Content));
+        Assert.Equal(2, requested!.Count);
+    }
+
+    [Fact]
+    public async Task Summary_IsIdempotent_AndChecked()
+    {
+        var store = CreateStore();
+        await store.AppendTurnAsync(Turn("t1", 0, User("a"), Assistant("b")), TestContext.Current.CancellationToken);
+        var inc = (await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken)).Incarnation;
+
+        await store.AppendSummaryAsync(Summary("s1", 1, "S", inc), TestContext.Current.CancellationToken);
+        var again = await store.AppendSummaryAsync(Summary("s1", 1, "S", inc), TestContext.Current.CancellationToken);
+        Assert.Equal(ConversationAppendStatus.AlreadyAppended, again.Status);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.AppendSummaryAsync(Summary("s2", 0, "S", inc), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.AppendSummaryAsync(Summary("s3", 9, "S", inc), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<ConversationNotFoundException>(() => store.AppendSummaryAsync(Summary("s4", 1, "S", "other"), TestContext.Current.CancellationToken));
+        Assert.Equal(3, (await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken)).NextSequence);
+    }
+
+    [Fact]
+    public async Task SummaryEntry_RoundTripsItsMarker()
+    {
+        var store = CreateStore();
+        await store.AppendTurnAsync(Turn("t1", 0, User("a")), TestContext.Current.CancellationToken);
+        var inc = (await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken)).Incarnation;
+        await store.AppendSummaryAsync(Summary("s1", 1, "S", inc), TestContext.Current.CancellationToken);
+
+        Assert.Equal([new SummaryRecord { Sequence = 1, CoversUpToSequence = 1 }.Sequence], Manifest().Summaries!.Select(r => r.Sequence));
+        var entry = _backend.Raw(ChunkKeys().Single()).GetProperty("entries")[1];
+        Assert.Equal(1, entry.GetProperty("summary_of").GetInt64());
+    }
+
+    [Fact]
+    public async Task ASupersededSummaryInsideTheKeptRange_IsLeftOut()
+    {
+        var store = CreateStore();
+        await store.AppendTurnAsync(Turn("t1", 0, User("a"), Assistant("b")), TestContext.Current.CancellationToken);   // 0,1
+        await store.AppendTurnAsync(Turn("t2", 2, User("c"), Assistant("d")), TestContext.Current.CancellationToken);   // 2,3
+        var inc = (await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken)).Incarnation;
+        await store.AppendSummaryAsync(Summary("s1", 2, "S1", inc), TestContext.Current.CancellationToken);             // 4
+        await store.AppendTurnAsync(Turn("t3", 5, User("e")), TestContext.Current.CancellationToken);                   // 5
+        await store.AppendSummaryAsync(Summary("s2", 2, "S2", inc), TestContext.Current.CancellationToken);             // 6, S1 is inside [2, 7)
+
+        var loaded = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(["S2", "c", "d", "e"], loaded.Entries.Select(e => e.Message.Content));
+    }
+
+    [Fact]
+    public async Task PinnedLoad_WhoseSummaryWasDropped_FailsInsteadOfChangingItsHistory()
+    {
+        var store = CreateStore();
+        await store.AppendTurnAsync(Turn("t0", 0, User("a")), TestContext.Current.CancellationToken);
+        var inc = (await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken)).Incarnation;
+        await store.AppendSummaryAsync(Summary("s0", 1, "S0", inc), TestContext.Current.CancellationToken);              // seq 1
+        await store.AppendTurnAsync(Turn("t1", 2, User("b")), TestContext.Current.CancellationToken);                     // seq 2
+        var pinned = await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(["S0", "b"], pinned.Entries.Select(e => e.Message.Content));
+
+        for (var i = 1; i <= 32; i++)
+        {
+            await store.AppendSummaryAsync(Summary($"s{i}", 1, $"S{i}", inc), TestContext.Current.CancellationToken);
+        }
+
+        await Assert.ThrowsAsync<ConversationNotFoundException>(() =>
+            store.LoadAsync(ConversationId, pinned.NextSequence, pinned.Incarnation, TestContext.Current.CancellationToken));
+        Assert.Equal("S32", (await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken)).Entries[0].Message.Content);
+    }
+
+    [Fact]
+    public async Task LoadEntries_ReturnsTheRawHistory_SummariesIncluded()
+    {
+        var store = CreateStore();
+        await store.AppendTurnAsync(Turn("t1", 0, User("a"), Assistant("b")), TestContext.Current.CancellationToken);
+        var inc = (await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken)).Incarnation;
+        await store.AppendSummaryAsync(Summary("s1", 2, "S", inc), TestContext.Current.CancellationToken);
+        await store.AppendTurnAsync(Turn("t2", 3, User("c")), TestContext.Current.CancellationToken);
+
+        var all = await store.LoadEntriesAsync(ConversationId, 0, cancellationToken: TestContext.Current.CancellationToken);
+        var middle = await store.LoadEntriesAsync(ConversationId, 1, 3, TestContext.Current.CancellationToken);
+
+        Assert.Equal(["a", "b", "S", "c"], all.Select(e => e.Message.Content));
+        Assert.Equal([null, null, (long?)2, null], all.Select(e => e.SummaryOf));
+        Assert.Equal(["b", "S"], middle.Select(e => e.Message.Content));
+        Assert.Empty(await store.LoadEntriesAsync("missing", 0, cancellationToken: TestContext.Current.CancellationToken));
     }
 
     private void RewriteChunk(Action<ConversationChunk> change)

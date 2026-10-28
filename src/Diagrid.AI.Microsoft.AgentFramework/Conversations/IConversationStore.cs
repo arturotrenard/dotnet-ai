@@ -51,14 +51,45 @@ public interface IConversationStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Reads stored entries by sequence, exactly as committed: every message, including those a summary replaces
+    /// in <see cref="LoadAsync"/>, and the summaries themselves (<see cref="ConversationEntry.SummaryOf"/>). Use it
+    /// to show or export a full transcript.
+    /// </summary>
+    /// <param name="conversationId">The conversation identifier.</param>
+    /// <param name="fromSequence">The first sequence to return.</param>
+    /// <param name="toSequence">The sequence to stop before, or <see langword="null"/> for the end.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>The entries in the range, ordered by sequence; empty when the conversation does not exist.</returns>
+    Task<IReadOnlyList<ConversationEntry>> LoadEntriesAsync(
+        string conversationId, long fromSequence, long? toSequence = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Appends one turn atomically and idempotently. Appending a turn whose <see cref="ConversationTurn.TurnId"/>
     /// is already stored changes nothing and returns <see cref="ConversationAppendStatus.AlreadyAppended"/>.
     /// </summary>
     /// <param name="turn">The turn to append.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     /// <returns>Where the turn was stored.</returns>
+    /// <exception cref="ConversationNotFoundException">
+    /// The history the turn was produced against (<see cref="ConversationTurn.BaseIncarnation"/>) was deleted or expired.
+    /// </exception>
     /// <exception cref="ConversationStoreException">The turn could not be committed.</exception>
     Task<ConversationAppendResult> AppendTurnAsync(ConversationTurn turn, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Appends a summary of the start of the conversation. Later loads whose prefix includes it return the summary
+    /// in place of the entries below <see cref="ConversationSummary.CoversUpToSequence"/>; those entries stay stored.
+    /// A load pinned to a prefix from before the summary is unchanged. Appending the same
+    /// <see cref="ConversationSummary.SummaryId"/> again changes nothing.
+    /// </summary>
+    /// <param name="summary">The summary to append.</param>
+    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <returns>Where the summary was stored.</returns>
+    /// <exception cref="ConversationNotFoundException">
+    /// The summarized history (<see cref="ConversationSummary.BaseIncarnation"/>) was deleted or expired.
+    /// </exception>
+    /// <exception cref="ConversationStoreException">The summary could not be committed.</exception>
+    Task<ConversationAppendResult> AppendSummaryAsync(ConversationSummary summary, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Deletes a conversation and its history. A later append to the same id starts a new conversation.

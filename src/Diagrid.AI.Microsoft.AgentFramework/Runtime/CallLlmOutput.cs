@@ -40,4 +40,23 @@ internal sealed record CallLlmOutput
     /// <see cref="Abstractions.ReasoningReplay.AcrossTurns"/>.
     /// </summary>
     public Abstractions.ReasoningReplay? ReasoningReplay { get; init; }
+
+    /// <summary>
+    /// How many stored conversation entries the call loaded, or <see langword="null"/> without a conversation.
+    /// The run pins its history to the value its first call recorded.
+    /// </summary>
+    public long? HistorySequence { get; init; }
+
+    /// <summary>
+    /// The incarnation of the stored conversation the call loaded, or <see langword="null"/> when it was empty
+    /// or there was none.
+    /// </summary>
+    public string? HistoryIncarnation { get; init; }
+
+    /// <summary>
+    /// <see langword="true"/> when the stored history the call loaded has grown past the agent's compaction
+    /// trigger (<c>WithConversationCompaction</c>), so the run compacts the conversation after its commit.
+    /// <see langword="null"/> otherwise.
+    /// </summary>
+    public bool? CompactionDue { get; init; }
 }

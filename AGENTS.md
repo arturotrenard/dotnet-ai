@@ -181,6 +181,14 @@ constrains how you may write code:
   backend reads the key after a failed create rather than trusting the status. The Dapr client also
   returns defaults instead of throwing when cancelled, hence the cancellation checks after each call.
   `ConversationStoreRedisTests` pins each of these sidecar behaviors.
+  An agent run writes to the store only through `AppendConversationTurnActivity`, after its final
+  response, and only when `DaprAgentInvocation.ConversationId` is set: without one `AgentRunWorkflow`
+  must schedule exactly the activities it always did and call no `NewGuid()`, or in-flight instances stop
+  replaying. The golden tests in `Runtime/ConversationRunTests.cs` pin that sequence.
+  Compaction appends a summary entry (`AppendSummaryAsync`) instead of rewriting history: a load uses the
+  latest summary *inside its prefix*, so a prefix pinned before the summary never sees it. The workflow
+  schedules `CompactConversationActivity` only when the first `CallLlmOutput` recorded `CompactionDue`,
+  which keeps the decision deterministic across replays.
 
 ## Two unrelated things called "skills"
 

@@ -229,9 +229,11 @@ Actualizado el 2026-10-28: el razonamiento pasa adelante, porque es lo que neces
 2. **Historial de sesión durable con razonamiento**, estilo `DaprSessionStore` (ver "Cómo lo resuelve dapr-agents" en la Parte A). Plan en `docs/conversation-store-design.md` §6:
    - PR 1, capturar y reenviar el razonamiento. ✅ PR #6 en el fork.
    - PR 2, aplicar las `ChatOptions` del agente (#3), `WithReasoning` y `WithReasoningReplay`. ✅ PR #7 en el fork.
-   - PR 3, el store (`WithConversationStore`, `IConversationStore`), todavía sin conectar a los runs. En curso.
-   - PR 4, correr agentes contra una conversación guardada (`RunAgentInConversationAsync`, `AttachConversation`).
-   - PR 5, `SessionWorkflow` respaldado por el store.
+   - PR 3, el store (`WithConversationStore`, `IConversationStore`). PR #8 en el fork.
+   - PR 4, correr agentes contra una conversación guardada (`RunAgentInConversationAsync`, `AttachConversation`). PR #9 en el fork.
+   - PR 5, `SessionWorkflow` respaldado por el store (`CreateStoredSessionAsync`). En curso.
+   - PR 6, tope de contexto (`WithContextWindow`) y compactación persistida en el store (`WithConversationCompaction`). dapr-agents no tiene ninguna de las dos: manda todo el historial y, si se pasa del contexto, reintenta el mismo prompt. En curso.
+   - Después, según se necesite: caché de chunks, `ContinueAsNew` en `SessionWorkflow`, conteo real de tokens con el uso que reporta el proveedor.
 3. Cliente directo a Ollama en team_learning_agents y bake-off de esfuerzo.
 4. **#1:** reintentos durables.
 5. **#2:** `MaxIterations` configurable y la señal de agotamiento.

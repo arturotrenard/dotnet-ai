@@ -182,7 +182,7 @@ builder.Services.AddDaprAgents()
 ```
 
 It registers `IConversationStore`, which loads a conversation's history and appends one run's
-messages to it as a turn:
+messages to it as a turn (the agent runs below use it for you):
 
 - **A turn is stored all at once or not at all.** Its messages are written first, then a small
   manifest is committed with an ETag check, so a reader never sees half a turn.
@@ -213,6 +213,97 @@ messages that a conversation still references.
 > An append whose outcome cannot be confirmed (a lost reply) can leave unreferenced documents
 > behind. They are deleted once they provably cannot become part of the conversation; otherwise the
 > TTL removes them, so setting one is recommended.
+
+### Running agents against a stored conversation
+Inside a workflow, `RunAgentInConversationAsync` runs the agent on everything already committed to the
+conversation, its own earlier reasoning included, and appends the run as one turn if it succeeds:
+
+```csharp
+var planner = context.GetAgent("Planner");
+var conversationId = $"{context.InstanceId}/planning"; // deterministic: never Guid.NewGuid() in a workflow
+
+var first = await context.RunAgentInConversationAsync(planner, conversationId, "Draft a plan.");
+var second = await context.RunAgentInConversationAsync(planner, conversationId, "Now shorten it.");
+
+await context.DeleteConversationAsync(conversationId); // or rely on TimeToLive
+```
+
+Outside a workflow, attach a session to the conversation and run agents through the invoker:
+
+```csharp
+var session = invoker.AttachConversation("customer-42");
+await invoker.RunAgentAsync(agent, "Hi, I need help with my order.", session);
+await invoker.RunAgentAsync(agent, "It arrived damaged.", session); // sees the first turn
+```
+
+Session workflows can keep their conversation in the store too, so no growing log is sent with every
+turn. `CreateStoredSessionAsync` creates one:
+
+```csharp
+var session = await invoker.CreateStoredSessionAsync(workflowClient, new DaprSessionOptions { MaxTurns = 50 });
+
+// Keep both ids to reattach later: AttachSession(instanceId, conversationId).
+var instanceId = session.GetSessionInstanceId();
+var conversationId = session.GetConversationId();
+
+// After that session reached MaxTurns, continue the same conversation in a new one:
+var next = await invoker.CreateStoredSessionAsync(workflowClient,
+    new DaprSessionOptions { ConversationId = conversationId });
+```
+
+- **The history does not travel in workflow payloads.** Each LLM call loads it from the store, pinned to
+  what the run's first call saw, so every call of a run sees the same history.
+- **A failed run appends nothing**, so retrying it with the same conversation id is safe.
+- **A run that hits its iteration limit appends its messages too**, ending with the tool results, as
+  `TurnMessages` returns them.
+- **Reasoning follows `WithReasoningReplay`.** It is stored and sent back only to the agent and chat
+  client that produced it, and not stored at all with `WithinRun` or `Off`.
+- A run takes its history from a conversation or from `RunAgentWithHistoryAsync`'s prior messages, not
+  both. Runs without a conversation id work exactly as before.
+
+### Context window and compaction
+A long conversation eventually outgrows the model's context window. Two settings handle it:
+
+```csharp
+builder.Services.AddDaprAgents()
+    .WithAgent(/* ... */)
+    .WithConversationStore("statestore")
+    // What each LLM call sends is fitted to the model: 128k window, 8k kept for the reply.
+    .WithContextWindow("Planner", maxContextTokens: 128_000, maxOutputTokens: 8_000)
+    // Older turns are summarized once the loaded history passes 60k tokens; the last 4 stay word for word.
+    .WithConversationCompaction("Planner", options =>
+    {
+        options.TriggerTokens = 60_000;
+        options.KeepRecentTurns = 4;
+    });
+```
+
+- **`WithContextWindow`** changes only what one LLM call sends; nothing stored changes.
+  - It trims what came before the run (earlier turns, provider context) to the room the run's own messages
+    leave. It uses Microsoft Agent Framework's `ContextWindowCompactionStrategy`: above half of that
+    budget it collapses older tool calls and their results into short text, and above 80 % it drops the
+    oldest messages.
+  - System messages are always kept, a tool call is never separated from its results, and **the run's
+    own messages are never trimmed**: dropping them would lose the task or the reasoning a tool loop
+    needs. A single run larger than the window is sent whole.
+  - It works with any history, stored or passed in. Tokens are estimated as bytes / 4.
+- **`WithConversationCompaction`** keeps a stored conversation's meaning instead of dropping it:
+  - **When it runs:** after a run whose loaded history was past `TriggerTokens`, right after the run's
+    turn is stored and before the run returns, so that run's response waits for the summary call.
+  - **What it summarizes:** the oldest turns that fit `MaxSummaryInputTokens` (by default
+    `TriggerTokens`), together with the earlier summary. It keeps up to `KeepRecentTurns` recent turns
+    word for word, fewer if they add up to more than half the trigger, and always the latest. Turns that
+    do not fit are summarized by later runs. It uses the agent's own chat client and options, or
+    `options.ChatClient`.
+  - **Where the summary goes:** it is appended to the conversation, and later runs load it in place of
+    those turns. The original messages stay stored (`LoadEntriesAsync` reads them all), and a run already
+    in progress keeps the history it started with.
+  - **Cost:** the summary is computed once and stored, not on every call.
+  - **On failure:** compaction is best effort. If the summary call fails, the run still succeeds and the
+    next run tries again.
+
+Set both, with `TriggerTokens` well below the window: compaction keeps the conversation short, and the
+window is the safety net for a single run that grows too large.
 
 ## Model reasoning
 When the chat client returns the model's reasoning as `TextReasoningContent` (reasoning models

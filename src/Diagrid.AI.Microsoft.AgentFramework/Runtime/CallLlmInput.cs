@@ -63,4 +63,23 @@ internal sealed record CallLlmInput(
     /// recorded before this existed) counts as the first call.
     /// </summary>
     public int? Iteration { get; init; }
+
+    /// <summary>
+    /// The stored conversation whose history goes before <see cref="Messages"/>, or <see langword="null"/>.
+    /// </summary>
+    public string? ConversationId { get; init; }
+
+    /// <summary>
+    /// The history prefix to load: entries below this sequence. <see langword="null"/> on the run's first call,
+    /// which loads the whole conversation and records how much it loaded in
+    /// <see cref="CallLlmOutput.HistorySequence"/>; later calls pass that back, so every call of a run sees the
+    /// same history even while other runs append to it.
+    /// </summary>
+    public long? HistoryUpToSequence { get; init; }
+
+    /// <summary>
+    /// The conversation incarnation the first call loaded, so a later call fails rather than loading a
+    /// conversation created again under the same id.
+    /// </summary>
+    public string? HistoryIncarnation { get; init; }
 }

@@ -268,6 +268,11 @@ public sealed class DaprFixture : IAsyncLifetime
                     reg.RegisterWorkflow<EchoOrchestrationWorkflow>();
                     reg.RegisterWorkflow<DetachedEchoOrchestrationWorkflow>();
                     reg.RegisterWorkflow<ReasoningHistoryOrchestrationWorkflow>();
+                    reg.RegisterWorkflow<ConversationReasoningOrchestrationWorkflow>();
+                    reg.RegisterWorkflow<ConversationRetryOrchestrationWorkflow>();
+                    reg.RegisterWorkflow<DeleteConversationOrchestrationWorkflow>();
+                    reg.RegisterWorkflow<ConcurrentConversationOrchestrationWorkflow>();
+                    reg.RegisterWorkflow<CompactingConversationOrchestrationWorkflow>();
                     reg.RegisterWorkflow<CapitalOrchestrationWorkflow>();
                     reg.RegisterWorkflow<KeyedOrchestrationWorkflow>();
                 })
@@ -294,6 +299,14 @@ public sealed class DaprFixture : IAsyncLifetime
             .WithReasoning(ReasoningOptionsProbeAgent, ReasoningEffort.High)
             // --- Conversation store, in the workflow's own Redis state store ---
             .WithConversationStore(StateStoreName, options => options.KeyPrefix = ConversationKeyPrefix)
+            // --- Compacting agent: summarizes its conversations once they pass a small trigger ---
+            .WithAgent(_ => new CompactionMockChatClient()
+                .AsAIAgent(instructions: "Compacting agent", name: CompactionMockChatClient.AgentName))
+            .WithConversationCompaction(CompactionMockChatClient.AgentName, options =>
+            {
+                options.TriggerTokens = 50;
+                options.KeepRecentTurns = 1;
+            })
             // --- Keyed agents: different chat-client keys (mirrors KeyedAgentInvokerDemo) ---
             .WithAgent("chat-key-alpha",
                 _ => new TextResponseMockChatClient("Alpha response")
@@ -343,6 +356,11 @@ public sealed class DaprFixture : IAsyncLifetime
                 .AsAIAgent(
                     instructions: "Reasoning agent",
                     name: ReasoningMockChatClient.AgentName,
+                    tools: [AIFunctionFactory.Create(() => "noted", ReasoningMockChatClient.ToolName, "Takes a note.")]))
+            .WithAgent(_ => new FailOnceChatClient()
+                .AsAIAgent(
+                    instructions: "Reasoning agent",
+                    name: FailOnceChatClient.AgentName,
                     tools: [AIFunctionFactory.Create(() => "noted", ReasoningMockChatClient.ToolName, "Takes a note.")]))
             // --- Session history test agent: records the message count seen on each LLM call ---
             .WithAgent(_ => new MessageCountMockChatClient(historyRecorder)
