@@ -253,15 +253,15 @@ Orden de merge: #100 → #99 → #107 → #108. #109, #106 y #98 son independien
 
 Por Dapr Conversation el razonamiento no sale ni entra y el esfuerzo no se puede mandar (ver la Parte A), así que el enfoque es híbrido: cliente directo solo para los agentes que razonan.
 
-- [ ] `IChatClient` directo a Ollama Cloud:
-  - [ ] leer `message.reasoning` como `TextReasoningContent`;
-  - [ ] reenviar el razonamiento del historial en el campo de salida;
-  - [ ] mandar `reasoning_effort` desde `ChatOptions.Reasoning`, nunca `"none"`.
-- [ ] Usarlo solo en los agentes que razonan; el resto sigue en Dapr.
+- [x] `IChatClient` directo a Ollama Cloud (`OllamaChatClient`, team_learning_agents `5ac751f`, rama `feat/ollama-direct-client`):
+  - [x] leer `message.reasoning` como `TextReasoningContent`;
+  - [x] reenviar el razonamiento del historial en el campo `reasoning`;
+  - [x] mandar `reasoning_effort` desde `ChatOptions.Reasoning`, nunca `"none"`.
+- [x] Usarlo solo en los modelos con `"Direct": true` (hoy glm-5.3); el resto sigue en Dapr. Esfuerzo por agente en `AgentReasoning`.
 - [ ] Pasar team_learning_agents al store: `RunAgentInConversationAsync`, con `WithContextWindow` y `WithConversationCompaction`.
 - [ ] Probar en vivo con glm-5.3:
-  - [ ] ¿usa el razonamiento reenviado?
-  - [ ] ¿el esfuerzo cambia la profundidad o la calidad? (bake-off)
+  - [x] ¿usa el razonamiento reenviado? **Sí**: el mismo historial cuesta 66 tokens de entrada con el razonamiento y 48 sin él (`OllamaLiveTests`, 2026-10-28).
+  - [ ] ¿el esfuerzo cambia la profundidad o la calidad? El mecanismo sí: con `low` no devuelve razonamiento y con `high` sí. La calidad queda para el bake-off.
   - [ ] ¿la compactación funciona con un modelo real?
 - [ ] Abrir un issue en Dapr con lo medido: el proto de la Conversation API no tiene campos de razonamiento, langchaingo lee solo `reasoning_content` y no hay forma de mandar el esfuerzo.
 
@@ -277,7 +277,8 @@ Por Dapr Conversation el razonamiento no sale ni entra y el esfuerzo no se puede
 ## Pendiente de verificar
 
 - Que Ollama Cloud corra el mismo código de compatibilidad OpenAI que Ollama open source. Solo las pruebas en vivo de arriba están verificadas.
-- Si el esfuerzo de verdad cambia la profundidad o la calidad del razonamiento en glm-5.3.
+- Si el esfuerzo de verdad cambia la calidad del razonamiento en glm-5.3. La profundidad sí cambia: con `low` no razona y con `high` sí.
+- ~~Si glm-5.3 lee el razonamiento reenviado (§8.5 del diseño).~~ Sí: sube los tokens de entrada (66 contra 48), así que Ollama se lo pasa al modelo.
 - ~~Si guardar con first-write y sin ETag solo crea la clave (§8.1 del diseño).~~ Medido contra daprd 1.19 y Redis en el PR 3: solo crea, pero Redis reporta el conflicto como `Internal`, no `Aborted`.
 - Que OllamaSharp 5.5.0 traiga el mapeo de `Reasoning`, y que `ollama.com/api/chat` acepte la key con bearer.
 - Si los mantenedores de dapr/dapr exigen una propuesta formal para cambiar el proto.
