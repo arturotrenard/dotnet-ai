@@ -89,6 +89,8 @@ internal sealed record ConversationCompactionRegistration(string? AgentName, Con
 /// </summary>
 internal static class TokenEstimate
 {
+    internal static long Of(IEnumerable<string?> texts) => texts.Sum(t => (long)(t?.Length ?? 0)) / 4;
+
     internal static long Of(IEnumerable<WorkflowChatMessage> messages)
     {
         long chars = 0;

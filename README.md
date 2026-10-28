@@ -200,7 +200,7 @@ messages to it as a turn (the agent runs below use it for you):
 | Setting | Default | Meaning |
 |---|---|---|
 | `KeyPrefix` | `agent-conversation:` | Prefix of every key, after the component's own key prefix (the app id by default) |
-| `TimeToLive` | none | A conversation expires this long after its last append |
+| `TimeToLive` | none | A conversation expires this long after it was last written; a read after half of it renews it, so a run that pauses keeps its history |
 | `MaxChunkBytes` | 256 KiB | Size of each stored document of messages; keep it below the store's value limit |
 | `TurnDedupeWindow` | 128 | How many recent turn ids are remembered for idempotent appends |
 | `MaxCommitAttempts` | 10 | Commit attempts under contention before `ConversationStoreException` |
@@ -279,13 +279,14 @@ builder.Services.AddDaprAgents()
 ```
 
 - **`WithContextWindow`** changes only what one LLM call sends; nothing stored changes.
-  - It trims what came before the run (earlier turns, provider context) to the room the run's own messages
-    leave. It uses Microsoft Agent Framework's `ContextWindowCompactionStrategy`: above half of that
-    budget it collapses older tool calls and their results into short text, and above 80 % it drops the
-    oldest messages.
-  - System messages are always kept, a tool call is never separated from its results, and **the run's
-    own messages are never trimmed**: dropping them would lose the task or the reasoning a tool loop
-    needs. A single run larger than the window is sent whole.
+  - When what would be sent is larger than the window less the room kept for the reply, it leaves out
+    earlier turns, **whole and oldest first**, until it fits. A turn starts at a user message, so the
+    history sent never opens with an assistant message or a tool result, and a tool call always travels
+    with its results. A stored summary counts as a turn.
+  - The instructions, the context providers' messages and **the run's own messages are always sent**:
+    dropping them would lose the task, its context or the reasoning a tool loop needs. When those alone
+    do not fit, the LLM call fails with `ContextWindowExceededException` instead of reaching a model that
+    would reject the request or silently cut it.
   - It works with any history, stored or passed in. Tokens are estimated as bytes / 4.
 - **`WithConversationCompaction`** keeps a stored conversation's meaning instead of dropping it:
   - **When it runs:** after a run whose loaded history was past `TriggerTokens`, right after the run's

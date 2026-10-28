@@ -71,7 +71,7 @@ internal sealed class ConversationManifest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public long? SummariesDroppedMax { get; set; }
 
-    /// <summary>Unix milliseconds of the last commit; always increases.</summary>
+    /// <summary>Unix milliseconds of the last write: a commit, or a read that renewed the TTL. Always increases.</summary>
     [JsonPropertyName("mtime")]
     public long ModifiedMs { get; set; }
 

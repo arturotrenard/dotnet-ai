@@ -15,7 +15,6 @@ using Dapr.Workflow;
 using Diagrid.AI.Microsoft.AgentFramework.Abstractions;
 using Diagrid.AI.Microsoft.AgentFramework.Conversations;
 using Microsoft.Agents.AI;
-using Microsoft.Agents.AI.Compaction;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 
@@ -95,8 +94,7 @@ internal sealed partial class CallLlmActivity(
             var replay = ReasoningReplayRegistration.Resolve(reasoningReplays ?? [], input.AgentName);
             var messages = BuildChatMessages(config.Instructions, input.AdditionalInstructions, input.AdditionalMessages,
                 runMessages, reasoningSource, replay, runMessagesStart);
-            messages = await FitContextWindowAsync(input.AgentName, messages, runMessages, runMessagesStart, timeoutCts.Token)
-                .ConfigureAwait(false);
+            messages = FitContextWindow(input.AgentName, messages, runMessages, runMessagesStart, input.AdditionalMessages);
             var additionalTools = ResolveAdditionalTools(input.AgentName, input.AdditionalToolNames);
             var reasoning = ReasoningEffortRegistration.Resolve(reasoningEfforts ?? [], input.AgentName, config.BaseOptions?.Reasoning);
             WarnIfEffortIgnored(input.AgentName, config.ChatClient, reasoning);
@@ -152,45 +150,84 @@ internal sealed partial class CallLlmActivity(
     /// it has none. Only what is sent changes; nothing stored does.
     /// </summary>
     /// <remarks>
-    /// Only the part before the run's own messages (instructions, context provider messages, earlier turns) is
-    /// trimmed, against the budget the run leaves. The run's messages are never touched: dropping its user
-    /// message loses the task, and collapsing its tool calls strips the reasoning a provider such as Anthropic
-    /// requires next to each tool result. A run that alone exceeds the window is sent as it is.
+    /// Only earlier turns are dropped, whole and oldest first, until what is sent fits the window less the room kept
+    /// for the reply. A turn starts at a user message, so the history sent never opens with an assistant message or a
+    /// tool result, and a tool call is never separated from its results; a stored summary is a turn of its own. The
+    /// instructions, the context providers' messages and the run's own messages are always sent: dropping them would
+    /// lose the task, the context the run was given, or the reasoning a tool loop needs. When those alone do not fit,
+    /// the call fails with a <see cref="ContextWindowExceededException"/> instead of reaching the model, which would
+    /// reject the request or silently cut it.
     /// </remarks>
-    private async Task<List<ChatMessage>> FitContextWindowAsync(
+    private List<ChatMessage> FitContextWindow(
         string agentName,
         List<ChatMessage> messages,
         List<WorkflowChatMessage> runMessages,
         int runMessagesStart,
-        CancellationToken cancellationToken)
+        List<WorkflowChatMessage>? additionalMessages)
     {
         if (ContextWindowRegistration.Resolve(contextWindows ?? [], agentName) is not { } window)
         {
             return messages;
         }
 
-        // BuildChatMessages appends one chat message per run message, last.
-        var runCount = Math.Max(0, runMessages.Count - runMessagesStart);
-        var prefix = messages.Take(messages.Count - runCount).ToList();
-        var run = messages.Skip(messages.Count - runCount);
+        // BuildChatMessages appends one chat message per run message, last, after the system message and the
+        // context providers' messages.
+        var historyCount = Math.Min(runMessagesStart, runMessages.Count);
+        var head = messages.Count - runMessages.Count;
+        var history = runMessages.Take(historyCount).ToList();
 
-        var runTokens = TokenEstimate.Of(runMessages.Skip(runMessagesStart));
-        var prefixBudget = (int)Math.Max(window.MaxOutputTokens + 1L, window.MaxContextTokens - runTokens);
+        var budget = (long)window.MaxContextTokens - window.MaxOutputTokens;
+        var fixedTokens = TokenEstimate.Of(messages.Take(head).Where(m => m.Role == ChatRole.System).Select(m => m.Text))
+            + TokenEstimate.Of(additionalMessages ?? [])
+            + TokenEstimate.Of(runMessages.Skip(historyCount));
+        if (fixedTokens > budget)
+        {
+            LogContextWindowExceeded(agentName, fixedTokens, window.MaxContextTokens, window.MaxOutputTokens);
+            throw new ContextWindowExceededException(
+                $"The LLM call for agent '{agentName}' needs about {fixedTokens} tokens for its instructions, context " +
+                $"and the run's own messages, more than its context window of {window.MaxContextTokens} tokens leaves " +
+                $"after the {window.MaxOutputTokens} kept for the reply, even with every earlier turn left out. Raise " +
+                "it with WithContextWindow(...) if the model allows more, or shorten what the run's tools return.");
+        }
 
-        // MAF's compaction API is experimental (MAAI001).
-#pragma warning disable MAAI001
-        var strategy = new ContextWindowCompactionStrategy(prefixBudget, window.MaxOutputTokens);
-        var fittedPrefix = (await CompactionProvider.CompactAsync(strategy, prefix, logger, cancellationToken)
-            .ConfigureAwait(false)).ToList();
-#pragma warning restore MAAI001
+        var turns = SplitTurns(history);
+        var historyTokens = turns.Sum(t => t.Tokens);
+        var dropped = 0;
+        var droppedMessages = 0;
+        while (fixedTokens + historyTokens > budget)
+        {
+            historyTokens -= turns[dropped].Tokens;
+            droppedMessages += turns[dropped].Count;
+            dropped++;
+        }
 
-        if (fittedPrefix.Count == prefix.Count)
+        if (droppedMessages == 0)
         {
             return messages;
         }
 
-        LogContextWindowApplied(agentName, messages.Count, fittedPrefix.Count + runCount);
-        return [.. fittedPrefix, .. run];
+        LogContextWindowApplied(agentName, messages.Count, messages.Count - droppedMessages);
+        return [.. messages.Take(head), .. messages.Skip(head + droppedMessages)];
+    }
+
+    /// <summary>
+    /// Splits earlier messages into turns, each starting at a user message, with its estimated tokens. Messages
+    /// before the first user message (a stored summary) form a turn of their own.
+    /// </summary>
+    internal static List<(int Count, long Tokens)> SplitTurns(List<WorkflowChatMessage> history)
+    {
+        var turns = new List<(int Count, long Tokens)>();
+        var start = 0;
+        for (var i = 1; i <= history.Count; i++)
+        {
+            if (i == history.Count || string.Equals(history[i].Role, "user", StringComparison.OrdinalIgnoreCase))
+            {
+                turns.Add((i - start, TokenEstimate.Of(history.Skip(start).Take(i - start))));
+                start = i;
+            }
+        }
+
+        return turns;
     }
 
     /// <summary>
@@ -458,6 +495,9 @@ internal sealed partial class CallLlmActivity(
 
     [LoggerMessage(LogLevel.Information, "Fitted agent '{AgentName}' messages to its context window: {Before} messages became {After}")]
     private partial void LogContextWindowApplied(string agentName, int before, int after);
+
+    [LoggerMessage(LogLevel.Error, "LLM call for agent '{AgentName}' needs about {Tokens} tokens without any earlier turn, more than its context window of {ContextTokens} less {OutputTokens} for the reply")]
+    private partial void LogContextWindowExceeded(string agentName, long tokens, int contextTokens, int outputTokens);
 
     [LoggerMessage(LogLevel.Error, "LLM call for agent '{AgentName}' timed out after {Timeout}")]
     private partial void LogLlmCallTimeout(string agentName, TimeSpan timeout);
