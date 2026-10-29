@@ -25,7 +25,7 @@ namespace Diagrid.AI.Microsoft.AgentFramework.Hosting;
 
 internal sealed class DaprAgentsBuilder(
     IServiceCollection services,
-    WorkflowServiceCollectionExtensions.DaprWorkflowBuilder? workflowBuilder = null) : IAgentsBuilder
+    WorkflowServiceCollectionExtensions.DaprWorkflowBuilder workflowBuilder) : IAgentsBuilder
 {
     internal IServiceCollection Services { get; } = services;
 
@@ -33,7 +33,7 @@ internal sealed class DaprAgentsBuilder(
     /// The Dapr Workflow builder <c>AddDaprAgents</c> created. Its constructor is internal to the Dapr SDK,
     /// so builder extensions such as <c>WithBinaryStorePayloads</c> can only reach it through here.
     /// </summary>
-    internal WorkflowServiceCollectionExtensions.DaprWorkflowBuilder? WorkflowBuilder { get; } = workflowBuilder;
+    internal WorkflowServiceCollectionExtensions.DaprWorkflowBuilder WorkflowBuilder { get; } = workflowBuilder;
 
     public IAgentsBuilder WithAgent(Func<IServiceProvider, AIAgent> factory)
     {

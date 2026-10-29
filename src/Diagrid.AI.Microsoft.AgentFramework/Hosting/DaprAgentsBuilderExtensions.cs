@@ -186,12 +186,13 @@ public static class DaprAgentsBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrWhiteSpace(storeName);
 
-        if (builder is not DaprAgentsBuilder { WorkflowBuilder: { } workflowBuilder })
+        if (builder is not DaprAgentsBuilder daprBuilder)
         {
-            throw new InvalidOperationException("The agents builder does not expose its Dapr Workflow builder.");
+            throw new InvalidOperationException(
+                "WithBinaryStorePayloads requires the agents builder returned by AddDaprAgents().");
         }
 
-        Dapr.Workflow.BinaryStorePayloadServiceCollectionExtensions.WithBinaryStorePayloads(workflowBuilder, options =>
+        Dapr.Workflow.BinaryStorePayloadServiceCollectionExtensions.WithBinaryStorePayloads(daprBuilder.WorkflowBuilder, options =>
         {
             options.StoreName = storeName;
             options.WritePreference = PayloadWritePreference.PreferReference;
