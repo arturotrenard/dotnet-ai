@@ -244,7 +244,7 @@ Actualizado el 2026-10-28. Cada punto va primero al fork (`dev`) y después, si 
 - [ ] #108, razonamiento e historial durable con contexto y compactación: depende de #100, #107 y #99.
 - [ ] #109, una tool que falla vuelve al modelo y las respuestas tipadas respetan su contexto JSON (antes #96 y #97).
 - [ ] #106, `args` de Catalyst.
-- [ ] #98, ejemplo `TeamLearningDemo`.
+- [ ] #98, ejemplo `TeamLearningDemo`: corregidos el lado que el CLI juzgaba como resistencia y la caída con un `side` que no es texto (`74464e0`).
 - [ ] Opcional: aclarar en los cierres de #101 y #102 que #107 ya no incluye el timeout.
 
 Orden de merge: #100 → #99 → #107 → #108. #109, #106 y #98 son independientes.
@@ -258,12 +258,53 @@ Por Dapr Conversation el razonamiento no sale ni entra y el esfuerzo no se puede
   - [x] reenviar el razonamiento del historial en el campo `reasoning`;
   - [x] mandar `reasoning_effort` desde `ChatOptions.Reasoning`, nunca `"none"`.
 - [x] Usarlo solo en los modelos con `"Direct": true` (hoy glm-5.3); el resto sigue en Dapr. Esfuerzo por agente en `AgentReasoning`.
-- [ ] Pasar team_learning_agents al store: `RunAgentInConversationAsync`, con `WithContextWindow` y `WithConversationCompaction`.
+- [x] Pasar team_learning_agents al store (`1c2b860`): `RunAgentInConversationAsync` con TTL de 30 días y `WithContextWindow` con la ventana real de cada modelo (`a35dd0c`).
+- [ ] Activar `WithConversationCompaction` en team_learning_agents.
 - [ ] Probar en vivo con glm-5.3:
   - [x] ¿usa el razonamiento reenviado? **Sí**: el mismo historial cuesta 66 tokens de entrada con el razonamiento y 48 sin él (`OllamaLiveTests`, 2026-10-28).
   - [ ] ¿el esfuerzo cambia la profundidad o la calidad? El mecanismo sí: con `low` no devuelve razonamiento y con `high` sí. La calidad queda para el bake-off.
   - [ ] ¿la compactación funciona con un modelo real?
 - [ ] Abrir un issue en Dapr con lo medido: el proto de la Conversation API no tiene campos de razonamiento, langchaingo lee solo `reasoning_content` y no hay forma de mandar el esfuerzo.
+
+### Refactors SOLID pendientes
+
+Las auditorías SOLID del 2026-10-29 dejaron estas mejoras para después, en PRs propios. Ninguna corrige un error; lo urgente ya se hizo (upstream #107 `94c6240`, #108 `7d29adf`, #98 `74464e0`; fork #17).
+
+**Librería: store de conversaciones** (`DaprConversationStore` sigue siendo grande):
+- [ ] `ConversationDocumentCodec`: la (de)serialización de manifiesto y chunks y el control de versión, hoy en siete puntos del store.
+- [ ] `ChunkPlanner`: la regla de plegado del último chunk y el empaquetado por tamaño (`ChunkEnvelopeBytes`, `BuildChunks`).
+- [ ] Un solo lugar para las listas acotadas del manifiesto: `AddSummary`, `TrimTurns` y la búsqueda del resumen vigente.
+- [ ] Sacar la renovación del TTL al leer (`RenewTtlAsync`, `RefreshChunksAsync`, `DeleteResurrectedChunksAsync`) a su propio tipo.
+- [ ] `ConversationKeys`: el formato de las claves como clase pura; antes, una constante compartida con los caracteres reservados que hoy se repiten en el store y en `Options.Validate`.
+
+**Librería: runtime y hosting:**
+- [ ] `LlmRequestBuilder`: el armado del prompt y de las opciones fuera de `CallLlmActivity`. Es en buena parte código de `master`, así que va en un PR aparte.
+- [ ] `ReasoningReplayPolicy`: las reglas de reenvío del razonamiento, hoy repartidas entre `AgentRunWorkflow` y `CallLlmActivity`.
+- [ ] Sacar el plan de compactación y el armado del transcript de `CompactConversationActivity`.
+- [ ] Un helper para la búsqueda perezosa de la configuración de chat y el timeout de las cuatro actividades que llaman al LLM. Las cuatro juntas, porque dos están en `master`.
+- [ ] Mover `IsDaprChatClient` junto a `GetDelegatingInnerClient` y documentar por qué el aviso de una sola vez vive en el registro.
+- [ ] Un helper para los tres casts a `DaprAgentsBuilder`, con un solo mensaje de error.
+- [ ] Una fábrica de `DaprAgentInvocation` en `WorkflowContextExtensions` (hoy cuatro inicializadores casi iguales).
+- [ ] `AgentComponentRegistrar` interno con `RegisterAgentComponents` y `WrapIfNeeded`, fuera de la clase pública de extensiones.
+- [ ] `WithBinaryStorePayloads` en su propio archivo parcial, como ya se hizo con razonamiento y conversaciones.
+
+**Ejemplo `TeamLearningDemo` (#98):**
+- [ ] Que la clase de la skill solo adapte: `Levels.RequiredCandles(p)` y una ventana compartida con el backtest.
+- [ ] Un enum `Side` dentro de `Market`, con texto solo en los bordes.
+- [ ] `LevelParams.With`: que un parámetro desconocido lance en vez de ignorarse (`_ => p`).
+- [ ] Fijar la ventana de datos del backtest por run, para que la línea base y cada propuesta se juzguen sobre el mismo split.
+- [ ] Un record con nombre para las filas del backtest en vez de la tupla y los genéricos `<T>`.
+- [ ] Sacar el CLI `--backtest` de `Program.cs`.
+- [ ] Un solo dueño de la skill publicada (`SkillParams.LoadAsync(TeamPaths)`) en vez de cinco lecturas de `params.json`.
+- [ ] Que los prompts y las instrucciones de la skill interpolen las constantes del código en vez de repetirlas.
+
+**team_learning_agents:**
+- [ ] Un decorador `MeteredChatClient` para el registro de uso y la señal de cuota.
+- [ ] `LlmUsage`, `AgentUsage` y `AgentUsageReport` en su propio archivo.
+- [ ] Compartir los helpers del protocolo de tools entre los dos clientes.
+- [ ] Sacar el nombrado de los agentes del bake-off de `AgentModels`.
+- [ ] Mover de `Program.cs` a métodos de extensión el cableado de clientes, ventana de contexto y razonamiento.
+- [ ] Que cada `Model` responda por su ventana, su precio y su nombre directo.
 
 ### Después (Parte B)
 
