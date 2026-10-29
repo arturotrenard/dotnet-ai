@@ -47,6 +47,23 @@ internal sealed record LlmTimeoutRegistration(string? AgentName, TimeSpan Timeou
     }
 
     /// <summary>
+    /// A token source that cancels after <paramref name="timeout"/>, or never for
+    /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>. The caller disposes it.
+    /// </summary>
+    /// <param name="timeout">The timeout <see cref="Resolve"/> returned.</param>
+    /// <returns>The token source bounding one LLM call.</returns>
+    internal static CancellationTokenSource StartTimeout(TimeSpan timeout)
+    {
+        var timeoutCts = new CancellationTokenSource();
+        if (timeout != System.Threading.Timeout.InfiniteTimeSpan)
+        {
+            timeoutCts.CancelAfter(timeout);
+        }
+
+        return timeoutCts;
+    }
+
+    /// <summary>
     /// Throws unless <paramref name="timeout"/> is positive and at most <see cref="MaxTimeout"/>, or is
     /// <see cref="System.Threading.Timeout.InfiniteTimeSpan"/>.
     /// </summary>

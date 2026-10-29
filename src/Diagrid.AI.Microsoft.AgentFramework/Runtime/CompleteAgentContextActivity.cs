@@ -53,14 +53,8 @@ internal sealed partial class CompleteAgentContextActivity(
     /// <inheritdoc />
     public override async Task<CompleteAgentContextOutput> RunAsync(WorkflowActivityContext context, CompleteAgentContextInput input)
     {
-        var config = chatClientRegistry.Get(input.AgentName);
-        if (config is null)
-        {
-            // Trigger lazy agent resolution — this runs the factory which populates
-            // ChatClientRegistry (including any configured AIContextProviders) as a side effect.
-            agentRegistry.Get(input.AgentName, input.ChatClientKey, serviceProvider);
-            config = chatClientRegistry.Get(input.AgentName);
-        }
+        // Runs the agent's factory first when needed, which registers its AIContextProviders too.
+        var config = AgentChatConfigLookup.Find(chatClientRegistry, agentRegistry, serviceProvider, input.AgentName, input.ChatClientKey);
 
         if (config?.ContextProviders is not { Count: > 0 } providers)
         {

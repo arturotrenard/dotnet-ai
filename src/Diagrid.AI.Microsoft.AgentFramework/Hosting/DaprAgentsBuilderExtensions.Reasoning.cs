@@ -48,7 +48,7 @@ public static partial class DaprAgentsBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ReasoningEffortRegistration.Validate(effort, output);
 
-        GetServices(builder).AddSingleton(new ReasoningEffortRegistration(null, effort, output));
+        AgentComponentRegistrar.GetServices(builder).AddSingleton(new ReasoningEffortRegistration(null, effort, output));
 
         return builder;
     }
@@ -76,7 +76,7 @@ public static partial class DaprAgentsBuilderExtensions
         ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
         ReasoningEffortRegistration.Validate(effort, output);
 
-        GetServices(builder).AddSingleton(new ReasoningEffortRegistration(agentName, effort, output));
+        AgentComponentRegistrar.GetServices(builder).AddSingleton(new ReasoningEffortRegistration(agentName, effort, output));
 
         return builder;
     }
@@ -99,7 +99,7 @@ public static partial class DaprAgentsBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ReasoningReplayRegistration.Validate(replay);
 
-        GetServices(builder).AddSingleton(new ReasoningReplayRegistration(null, replay));
+        AgentComponentRegistrar.GetServices(builder).AddSingleton(new ReasoningReplayRegistration(null, replay));
 
         return builder;
     }
@@ -121,7 +121,7 @@ public static partial class DaprAgentsBuilderExtensions
         ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
         ReasoningReplayRegistration.Validate(replay);
 
-        GetServices(builder).AddSingleton(new ReasoningReplayRegistration(agentName, replay));
+        AgentComponentRegistrar.GetServices(builder).AddSingleton(new ReasoningReplayRegistration(agentName, replay));
 
         return builder;
     }

@@ -193,7 +193,7 @@ public sealed class ReasoningOptionsTests
             }
         });
 
-        DaprAgentsBuilderExtensions.RegisterAgentComponents(services, agent, new CallLlmActivityTests.CapturingChatClient());
+        AgentComponentRegistrar.RegisterAgentComponents(services, agent, new CallLlmActivityTests.CapturingChatClient());
 
         var config = services.GetRequiredService<ChatClientRegistry>().Get(AgentName)!;
         Assert.Equal(0.3f, config.BaseOptions!.Temperature);

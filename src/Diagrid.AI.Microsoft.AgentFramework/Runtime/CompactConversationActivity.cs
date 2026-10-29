@@ -10,7 +10,6 @@
 // On the Change Date, this software will be available under
 // the Apache License, Version 2.0.
 
-using System.Text;
 using Dapr.Workflow;
 using Diagrid.AI.Microsoft.AgentFramework.Conversations;
 using Microsoft.Extensions.AI;
@@ -99,8 +98,8 @@ internal sealed partial class CompactConversationActivity(
         }
 
         var previous = snapshot.Entries.FirstOrDefault(e => e.SummaryOf is not null);
-        var turns = SplitTurnsByTurnId(snapshot.Entries.Where(e => e.SummaryOf is null));
-        var plan = PlanCompaction(turns, previous, options);
+        var turns = CompactionPlanner.SplitTurnsByTurnId(snapshot.Entries.Where(e => e.SummaryOf is null));
+        var plan = CompactionPlanner.PlanCompaction(turns, previous, options);
         if (plan is null)
         {
             return new CompactConversationOutput();
@@ -124,76 +123,6 @@ internal sealed partial class CompactConversationActivity(
 
         LogCompacted(input.ConversationId, older.Count, coversUpTo);
         return new CompactConversationOutput { Compacted = true, CoversUpToSequence = coversUpTo };
-    }
-
-    /// <summary>
-    /// Picks what to summarize: the oldest turns that fit <see cref="ConversationCompactionOptions.MaxSummaryInputTokens"/>
-    /// together with the earlier summary (at least one turn), leaving the most recent turns: at most
-    /// <see cref="ConversationCompactionOptions.KeepRecentTurns"/>, within half of the trigger, and always the latest.
-    /// Returns <see langword="null"/> when nothing can be summarized.
-    /// </summary>
-    internal static (List<ConversationEntry> Older, long CoversUpTo)? PlanCompaction(
-        List<List<ConversationEntry>> turns, ConversationEntry? previous, ConversationCompactionOptions options)
-    {
-        static long Tokens(IEnumerable<ConversationEntry> entries) => TokenEstimate.Of(entries.Select(e => e.Message));
-
-        var keepBudget = options.TriggerTokens / 2;
-        var kept = 1;
-        long keptTokens = Tokens(turns.Count > 0 ? turns[^1] : []);
-        while (kept < options.KeepRecentTurns && kept < turns.Count)
-        {
-            var candidate = Tokens(turns[turns.Count - 1 - kept]);
-            if (keptTokens + candidate > keepBudget)
-            {
-                break;
-            }
-
-            keptTokens += candidate;
-            kept++;
-        }
-
-        var summarizable = turns.Count - kept;
-        if (summarizable <= 0)
-        {
-            return null;
-        }
-
-        var inputBudget = options.MaxSummaryInputTokens ?? options.TriggerTokens;
-        var used = previous is null ? 0 : TokenEstimate.Of([previous.Message]);
-        var take = 0;
-        while (take < summarizable)
-        {
-            var size = Tokens(turns[take]);
-            if (take > 0 && used + size > inputBudget)
-            {
-                break;
-            }
-
-            used += size;
-            take++;
-        }
-
-        var older = turns.Take(take).SelectMany(t => t).ToList();
-        return (older, turns[take][0].Sequence);
-    }
-
-    /// <summary>
-    /// Groups entries into turns: consecutive entries committed by the same turn.
-    /// </summary>
-    internal static List<List<ConversationEntry>> SplitTurnsByTurnId(IEnumerable<ConversationEntry> entries)
-    {
-        var turns = new List<List<ConversationEntry>>();
-        foreach (var entry in entries)
-        {
-            if (turns.Count == 0 || turns[^1][0].TurnId != entry.TurnId)
-            {
-                turns.Add([]);
-            }
-
-            turns[^1].Add(entry);
-        }
-
-        return turns;
     }
 
     private async Task<string?> SummarizeAsync(
@@ -223,73 +152,24 @@ internal sealed partial class CompactConversationActivity(
             }
         }
 
-        // The turns go as one transcript, not as chat messages: replaying tool calls without their tool
-        // definitions is rejected by some providers, and reasoning blocks cannot be sent to another model.
-        var transcript = new StringBuilder();
-        if (previous is not null)
-        {
-            transcript.AppendLine("Earlier summary:").AppendLine(previous.Message.Content).AppendLine();
-        }
-
-        transcript.AppendLine("Conversation to summarize:");
-        foreach (var entry in older)
-        {
-            AppendTranscript(transcript, entry.Message);
-        }
-
-        // A single turn larger than the budget is cut, so the summary call always fits.
-        var maxChars = (long)(options.MaxSummaryInputTokens ?? options.TriggerTokens) * TokenEstimate.CharsPerToken;
-        if (transcript.Length > maxChars)
-        {
-            transcript.Length = (int)maxChars;
-            transcript.AppendLine().Append("[truncated]");
-        }
+        var transcript = CompactionPlanner.BuildTranscript(previous, older, options);
 
         var timeout = LlmTimeoutRegistration.Resolve(llmTimeouts ?? [], input.AgentName);
-        using var timeoutCts = new CancellationTokenSource();
-        if (timeout != Timeout.InfiniteTimeSpan)
-        {
-            timeoutCts.CancelAfter(timeout);
-        }
+        using var timeoutCts = LlmTimeoutRegistration.StartTimeout(timeout);
 
         var response = await client.GetResponseAsync(
-            [new ChatMessage(ChatRole.System, options.SummarizationPrompt), new ChatMessage(ChatRole.User, transcript.ToString())],
+            [new ChatMessage(ChatRole.System, options.SummarizationPrompt), new ChatMessage(ChatRole.User, transcript)],
             chatOptions,
             timeoutCts.Token).ConfigureAwait(false);
 
         return response.Text;
     }
 
-    internal static void AppendTranscript(StringBuilder transcript, WorkflowChatMessage message)
-    {
-        if (!string.IsNullOrEmpty(message.Content))
-        {
-            transcript.Append(message.Role).Append(": ").AppendLine(message.Content);
-        }
-
-        foreach (var call in message.FunctionCalls ?? [])
-        {
-            transcript.Append(message.Role).Append(" called ").Append(call.Name).Append(' ').AppendLine(call.ArgumentsJson);
-        }
-
-        foreach (var result in message.FunctionResults ?? [])
-        {
-            transcript.Append("tool result: ").AppendLine(result.ResultJson ?? "(none)");
-        }
-    }
-
     private ChatClientRegistry.AgentChatConfig ResolveAgentConfig(CompactConversationInput input)
     {
-        var config = chatClientRegistry.Get(input.AgentName);
-        if (config is null)
-        {
-            agentRegistry.Get(input.AgentName, input.ChatClientKey, serviceProvider);
-            config = chatClientRegistry.Get(input.AgentName)
-                ?? throw new InvalidOperationException(
-                    $"Agent '{input.AgentName}' has no chat client to summarize with. Set ConversationCompactionOptions.ChatClient.");
-        }
-
-        return config;
+        return AgentChatConfigLookup.Find(chatClientRegistry, agentRegistry, serviceProvider, input.AgentName, input.ChatClientKey)
+            ?? throw new InvalidOperationException(
+                $"Agent '{input.AgentName}' has no chat client to summarize with. Set ConversationCompactionOptions.ChatClient.");
     }
 
     [LoggerMessage(LogLevel.Information, "Compacted conversation '{ConversationId}': {Count} messages before entry {CoversUpTo} are now summarized")]

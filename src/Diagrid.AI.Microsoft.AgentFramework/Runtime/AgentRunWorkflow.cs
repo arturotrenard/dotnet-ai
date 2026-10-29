@@ -146,7 +146,7 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
 
                 // The first output tells the agent's replay setting. When earlier turns' reasoning is
                 // never sent back, stop carrying it in the inputs of the run's later calls.
-                if (iteration == 0 && llmOutput.ReasoningReplay is ReasoningReplay.WithinRun or ReasoningReplay.Off)
+                if (iteration == 0 && !ReasoningReplayPolicy.KeepsReasoningAcrossTurns(llmOutput.ReasoningReplay))
                 {
                     StripReasoning(messages, 0, turnStartIndex);
                 }
@@ -343,7 +343,7 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
     /// <see cref="ReasoningReplay.Off"/>, so its messages do not grow with reasoning never sent back.
     /// </summary>
     private static List<WorkflowReasoningContent>? KeptReasoning(CallLlmOutput llmOutput) =>
-        llmOutput.ReasoningReplay == ReasoningReplay.Off ? null : llmOutput.Reasoning;
+        ReasoningReplayPolicy.KeepsReasoningWithinRun(llmOutput.ReasoningReplay) ? llmOutput.Reasoning : null;
 
     /// <summary>
     /// The run's own messages returned as <see cref="AgentRunResult.TurnMessages"/>. With
@@ -356,7 +356,7 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
         ReasoningReplay? replay)
     {
         var turnMessages = messages.Skip(turnStartIndex).ToList();
-        if (replay is ReasoningReplay.WithinRun or ReasoningReplay.Off)
+        if (!ReasoningReplayPolicy.KeepsReasoningAcrossTurns(replay))
         {
             StripReasoning(turnMessages, 0, turnMessages.Count);
         }
