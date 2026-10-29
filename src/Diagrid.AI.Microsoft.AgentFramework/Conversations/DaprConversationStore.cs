@@ -145,42 +145,10 @@ internal sealed partial class DaprConversationStore : IConversationStore
 
             var from = summary?.CoversUpToSequence ?? 0;
 
-            var needed = live.Chunks.Where(c => c.FirstSequence < upTo && c.FirstSequence + c.Count > from).ToList();
-            var keys = needed.Select(c => ChunkKey(key, c.Id)).ToList();
-            var documents = await _backend.GetBulkAsync(keys, cancellationToken).ConfigureAwait(false);
-            if (keys.Any(k => !documents.ContainsKey(k)))
+            var range = await ReadRangeAsync(key, conversationId, live, from, upTo, attempt, cancellationToken).ConfigureAwait(false);
+            if (range is null)
             {
-                // A concurrent append folded the last chunk and deleted it after this manifest was read.
-                LogChunkMissingOnLoad(conversationId, attempt);
                 continue;
-            }
-
-            var range = new List<StoredConversationEntry>((int)Math.Min(upTo - from, int.MaxValue));
-            foreach (var chunkKey in keys)
-            {
-                foreach (var stored in ReadChunk(documents[chunkKey], chunkKey).Entries)
-                {
-                    if (stored.Sequence >= from && stored.Sequence < upTo)
-                    {
-                        range.Add(stored);
-                    }
-                }
-            }
-
-            range.Sort((x, y) => x.Sequence.CompareTo(y.Sequence));
-            for (var i = 0; i < range.Count; i++)
-            {
-                if (range[i].Sequence != from + i)
-                {
-                    throw new ConversationStoreException(
-                        $"Conversation '{conversationId}' is corrupt: expected entry {from + i}, found {range[i].Sequence}.");
-                }
-            }
-
-            if (range.Count != upTo - from)
-            {
-                throw new ConversationStoreException(
-                    $"Conversation '{conversationId}' is corrupt: expected {upTo - from} entries, found {range.Count}.");
             }
 
             var entries = new List<ConversationEntry>(range.Count);
@@ -230,27 +198,75 @@ internal sealed partial class DaprConversationStore : IConversationStore
                 return [];
             }
 
-            var keys = live.Chunks
-                .Where(c => c.FirstSequence < to && c.FirstSequence + c.Count > fromSequence)
-                .Select(c => ChunkKey(key, c.Id))
-                .ToList();
-            var documents = await _backend.GetBulkAsync(keys, cancellationToken).ConfigureAwait(false);
-            if (keys.Any(k => !documents.ContainsKey(k)))
+            var range = await ReadRangeAsync(key, conversationId, live, fromSequence, to, attempt, cancellationToken).ConfigureAwait(false);
+            if (range is null)
             {
-                LogChunkMissingOnLoad(conversationId, attempt);
                 continue;
             }
 
-            return keys
-                .SelectMany(k => ReadChunk(documents[k], k).Entries)
-                .Where(e => e.Sequence >= fromSequence && e.Sequence < to)
-                .OrderBy(e => e.Sequence)
-                .Select(ToEntry)
-                .ToList();
+            return range.Select(ToEntry).ToList();
         }
 
         throw new ConversationStoreException(
             $"Could not load conversation '{conversationId}': a chunk it references was still missing after {MaxLoadAttempts} attempts.");
+    }
+
+    /// <summary>
+    /// Reads the committed entries in [<paramref name="from"/>, <paramref name="to"/>) from the chunks
+    /// <paramref name="manifest"/> references, ordered by sequence. Returns <see langword="null"/> when a chunk is
+    /// missing (a concurrent append folded and deleted it after the manifest was read), so the caller reads the
+    /// manifest again. Throws when the range has a gap, a duplicate or a missing entry, so no caller gets a
+    /// silently truncated history.
+    /// </summary>
+    private async Task<List<StoredConversationEntry>?> ReadRangeAsync(
+        string key,
+        string conversationId,
+        ConversationManifest manifest,
+        long from,
+        long to,
+        int attempt,
+        CancellationToken cancellationToken)
+    {
+        var keys = manifest.Chunks
+            .Where(c => c.FirstSequence < to && c.FirstSequence + c.Count > from)
+            .Select(c => ChunkKey(key, c.Id))
+            .ToList();
+        var documents = await _backend.GetBulkAsync(keys, cancellationToken).ConfigureAwait(false);
+        if (keys.Any(k => !documents.ContainsKey(k)))
+        {
+            LogChunkMissingOnLoad(conversationId, attempt);
+            return null;
+        }
+
+        var range = new List<StoredConversationEntry>((int)Math.Min(to - from, int.MaxValue));
+        foreach (var chunkKey in keys)
+        {
+            foreach (var stored in ReadChunk(documents[chunkKey], chunkKey).Entries)
+            {
+                if (stored.Sequence >= from && stored.Sequence < to)
+                {
+                    range.Add(stored);
+                }
+            }
+        }
+
+        range.Sort((x, y) => x.Sequence.CompareTo(y.Sequence));
+        for (var i = 0; i < range.Count; i++)
+        {
+            if (range[i].Sequence != from + i)
+            {
+                throw new ConversationStoreException(
+                    $"Conversation '{conversationId}' is corrupt: expected entry {from + i}, found {range[i].Sequence}.");
+            }
+        }
+
+        if (range.Count != to - from)
+        {
+            throw new ConversationStoreException(
+                $"Conversation '{conversationId}' is corrupt: expected {to - from} entries, found {range.Count}.");
+        }
+
+        return range;
     }
 
     /// <inheritdoc />
@@ -382,9 +398,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
             var chunkWriteTtl = chunkTtl ?? (removeExpiry ? PersistTtl : null);
             var manifestWriteTtl = _options.TimeToLiveSeconds ?? (removeExpiry ? PersistTtl : null);
             var chunksWrittenMs = kept.Count > 0 ? manifest!.ChunksWrittenMs : now;
-            var refresh = kept.Count > 0
-                && (manifest!.ChunkTtlSeconds != chunkTtl
-                    || (_options.TimeToLive is { } ttl && now - chunksWrittenMs >= (long)ttl.TotalMilliseconds / 2));
+            var refresh = kept.Count > 0 && ChunksDueForRefresh(manifest!.ChunkTtlSeconds, chunksWrittenMs, now);
             if (refresh)
             {
                 if (!await RefreshChunksAsync(key, kept, chunkWriteTtl, cancellationToken).ConfigureAwait(false))
@@ -732,7 +746,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
         var renewed = false;
         try
         {
-            if (live.Chunks.Count > 0 && (live.ChunkTtlSeconds != ChunkTtlSeconds || now - live.ChunksWrittenMs >= ttlMs / 2))
+            if (live.Chunks.Count > 0 && ChunksDueForRefresh(live.ChunkTtlSeconds, live.ChunksWrittenMs, now))
             {
                 if (!await RefreshChunksAsync(key, live.Chunks, ChunkTtlSeconds, cancellationToken).ConfigureAwait(false))
                 {
@@ -781,6 +795,15 @@ internal sealed partial class DaprConversationStore : IConversationStore
 
         bool SafeToRenew(long at) => at - lastWritten < ttlMs - RenewalMargin(ttlMs);
     }
+
+    /// <summary>
+    /// Whether chunks written with <paramref name="writtenWithTtl"/> at <paramref name="writtenMs"/> must be written
+    /// again so they keep outliving the manifest: the configured TTL changed, or half their margin is used. The one
+    /// rule appends and reads share.
+    /// </summary>
+    private bool ChunksDueForRefresh(int? writtenWithTtl, long writtenMs, long now) =>
+        writtenWithTtl != ChunkTtlSeconds
+        || (_options.TimeToLive is { } ttl && now - writtenMs >= (long)ttl.TotalMilliseconds / 2);
 
     /// <summary>
     /// The last stretch before a manifest expires in which it is not renewed on read: a quarter of the TTL. It scales
@@ -841,7 +864,6 @@ internal sealed partial class DaprConversationStore : IConversationStore
     /// </summary>
     private static void AddSummary(ConversationManifest manifest, SummaryRecord added)
     {
-        const int MaxSummaries = 32;
         var all = new List<SummaryRecord>((manifest.Summaries?.Count ?? 0) + 1);
         if (manifest.Summaries is not null)
         {
@@ -849,11 +871,11 @@ internal sealed partial class DaprConversationStore : IConversationStore
         }
 
         all.Add(added);
-        if (all.Count > MaxSummaries)
+        if (all.Count > ConversationManifest.MaxSummaries)
         {
-            var dropped = all.Count - MaxSummaries;
+            var dropped = all.Count - ConversationManifest.MaxSummaries;
             manifest.SummariesDroppedMax = all.Take(dropped).Max(r => r.Sequence);
-            all = all.GetRange(dropped, MaxSummaries);
+            all = all.GetRange(dropped, ConversationManifest.MaxSummaries);
         }
 
         manifest.Summaries = all;
