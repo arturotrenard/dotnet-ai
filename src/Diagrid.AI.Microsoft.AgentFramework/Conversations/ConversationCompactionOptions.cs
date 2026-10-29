@@ -62,6 +62,12 @@ public sealed class ConversationCompactionOptions
     public IChatClient? ChatClient { get; set; }
 
     /// <summary>
+    /// Whether history estimated at <paramref name="tokens"/> is past <see cref="TriggerTokens"/>. The one rule the LLM
+    /// call (which flags it) and the compaction (which re-checks it) both use.
+    /// </summary>
+    internal bool IsDue(long tokens) => tokens > TriggerTokens;
+
+    /// <summary>
     /// Checks the settings.
     /// </summary>
     /// <exception cref="ArgumentException">A setting is out of range.</exception>

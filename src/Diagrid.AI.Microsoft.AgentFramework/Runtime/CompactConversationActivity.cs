@@ -93,13 +93,13 @@ internal sealed partial class CompactConversationActivity(
         var options = registration.Options;
         var store = ConversationStoreGuard.Require(conversationStore, input.ConversationId);
         var snapshot = await store.LoadAsync(input.ConversationId, incarnation: input.Incarnation).ConfigureAwait(false);
-        if (TokenEstimate.Of(snapshot.Entries.Select(e => e.Message)) <= options.TriggerTokens)
+        if (!options.IsDue(TokenEstimate.Of(snapshot.Entries.Select(e => e.Message))))
         {
             return new CompactConversationOutput();
         }
 
         var previous = snapshot.Entries.FirstOrDefault(e => e.SummaryOf is not null);
-        var turns = SplitTurns(snapshot.Entries.Where(e => e.SummaryOf is null));
+        var turns = SplitTurnsByTurnId(snapshot.Entries.Where(e => e.SummaryOf is null));
         var plan = PlanCompaction(turns, previous, options);
         if (plan is null)
         {
@@ -180,7 +180,7 @@ internal sealed partial class CompactConversationActivity(
     /// <summary>
     /// Groups entries into turns: consecutive entries committed by the same turn.
     /// </summary>
-    internal static List<List<ConversationEntry>> SplitTurns(IEnumerable<ConversationEntry> entries)
+    internal static List<List<ConversationEntry>> SplitTurnsByTurnId(IEnumerable<ConversationEntry> entries)
     {
         var turns = new List<List<ConversationEntry>>();
         foreach (var entry in entries)
@@ -238,7 +238,7 @@ internal sealed partial class CompactConversationActivity(
         }
 
         // A single turn larger than the budget is cut, so the summary call always fits.
-        var maxChars = (long)(options.MaxSummaryInputTokens ?? options.TriggerTokens) * 4;
+        var maxChars = (long)(options.MaxSummaryInputTokens ?? options.TriggerTokens) * TokenEstimate.CharsPerToken;
         if (transcript.Length > maxChars)
         {
             transcript.Length = (int)maxChars;

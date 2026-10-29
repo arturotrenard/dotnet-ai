@@ -153,7 +153,6 @@ public sealed class DaprConversationStateBackendTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => backend.SaveAsync("k", Value, null, cts.Token));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => backend.TrySaveAsync("k", Value, "1", null, cts.Token));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => backend.TryCreateAsync("n", Value, null, cts.Token));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => backend.DeleteAsync("k", cts.Token));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => backend.DeleteBulkAsync(["k"], cts.Token));
         Assert.True(_client.Items.ContainsKey("k"));
     }

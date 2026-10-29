@@ -168,21 +168,10 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
                         Reasoning = KeptReasoning(llmOutput)
                     });
 
-                    var finalTurnMessages = ToTurnMessages(messages, turnStartIndex, llmOutput.ReasoningReplay);
-                    var finalCommit = await CommitTurnAsync(context, input, turnId, historySequence, historyIncarnation, finalTurnMessages);
-                    await CompactIfDueAsync(context, input, turnId, compactionDue, finalCommit, historyIncarnation);
-
-                    await NotifyAfterCommitAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, finalCommit);
-
-                    return new AgentRunResult
-                    {
-                        Response = new AgentResponse(
+                    return await FinishRunAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages,
+                        llmOutput.ReasoningReplay, new AgentResponse(
                             WorkflowChatMessageConverter.CreateAssistantMessage(llmOutput.Text, llmOutput.Reasoning)),
-                        TurnMessages = finalTurnMessages,
-                        ConversationId = conversationId,
-                        ConversationSequence = EndOf(finalCommit, finalTurnMessages),
-                        ConversationBaseMoved = finalCommit?.BaseMoved
-                    };
+                        new StoredRun(turnId, historySequence, historyIncarnation, compactionDue));
                 }
 
                 // Tool-call loop
@@ -230,26 +219,52 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
 
             // The same messages TurnMessages returns, ending with tool results: callers that follow up with
             // "stop now" rely on exactly this, so the store keeps it too.
-            var turnMessages = ToTurnMessages(messages, turnStartIndex, lastReplay);
-            var commit = await CommitTurnAsync(context, input, turnId, historySequence, historyIncarnation, turnMessages);
-            await CompactIfDueAsync(context, input, turnId, compactionDue, commit, historyIncarnation);
-
-            await NotifyAfterCommitAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, commit);
-
-            return new AgentRunResult
-            {
-                Response = maxIterationResponse,
-                TurnMessages = turnMessages,
-                ConversationId = conversationId,
-                ConversationSequence = EndOf(commit, turnMessages),
-                ConversationBaseMoved = commit?.BaseMoved
-            };
+            return await FinishRunAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages,
+                lastReplay, maxIterationResponse, new StoredRun(turnId, historySequence, historyIncarnation, compactionDue));
         }
         catch (Exception ex)
         {
             await NotifyAgentContextCompleteAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, errorMessage: ex.Message);
             throw;
         }
+    }
+
+    /// <summary>
+    /// What a run against a stored conversation carries to its end: its turn id, the history it was pinned to, and
+    /// whether its first LLM call found the conversation due for compaction. All null or false without a conversation.
+    /// </summary>
+    private readonly record struct StoredRun(string? TurnId, long? HistorySequence, string? HistoryIncarnation, bool CompactionDue);
+
+    /// <summary>
+    /// Ends a run that produced its response (a final answer, or the iteration limit): commits its turn, compacts if
+    /// due, then notifies the context providers, in that order on every path, and builds the result. One place, so the
+    /// activity sequence cannot differ between the two ways a run ends.
+    /// </summary>
+    private static async Task<AgentRunResult> FinishRunAsync(
+        WorkflowContext context,
+        DaprAgentInvocation input,
+        ResolveAgentContextOutput agentContext,
+        List<WorkflowChatMessage> messages,
+        int turnStartIndex,
+        List<WorkflowChatMessage> turnRequestMessages,
+        ReasoningReplay? replay,
+        AgentResponse response,
+        StoredRun stored)
+    {
+        var turnMessages = ToTurnMessages(messages, turnStartIndex, replay);
+        var commit = await CommitTurnAsync(context, input, stored.TurnId, stored.HistorySequence, stored.HistoryIncarnation, turnMessages);
+        await CompactIfDueAsync(context, input, stored.TurnId, stored.CompactionDue, commit, stored.HistoryIncarnation);
+
+        await NotifyAfterCommitAsync(context, input, agentContext, messages, turnStartIndex, turnRequestMessages, commit);
+
+        return new AgentRunResult
+        {
+            Response = response,
+            TurnMessages = turnMessages,
+            ConversationId = input.ConversationId,
+            ConversationSequence = EndOf(commit, turnMessages),
+            ConversationBaseMoved = commit?.BaseMoved
+        };
     }
 
     /// <summary>

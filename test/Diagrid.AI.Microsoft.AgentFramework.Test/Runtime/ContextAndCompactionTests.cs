@@ -163,7 +163,30 @@ public sealed class ContextAndCompactionTests
             new(ChatRole.User, "the run"),
         ];
 
-        Assert.Equal([[1], [2, 3, 4], [5]], CallLlmActivity.SplitTurns(messages, 1, 6));
+        Assert.Equal([[1], [2, 3, 4], [5]], ContextWindowFitter.SplitTurnsByUserMessage(messages, 1, 6));
+    }
+
+    [Fact]
+    public void Fitter_DropsWholeEarlierTurnsOldestFirst_AndKeepsTheHeadAndTheRun()
+    {
+        List<ChatMessage> messages =
+        [
+            new(ChatRole.System, "instructions"),
+            new(ChatRole.User, "old question " + new string('a', 400)),
+            new(ChatRole.Assistant, "old answer " + new string('b', 400)),
+            new(ChatRole.User, "recent question"),
+            new(ChatRole.Assistant, "recent answer"),
+            new(ChatRole.User, "the run"),
+        ];
+
+        var fit = ContextWindowFitter.Fit(new PromptLayout(messages, HeadCount: 1, HistoryCount: 4, HistoryStartsWithSummary: false), 150, 50);
+
+        Assert.Equal(2, fit.Dropped);
+        Assert.Equal(["instructions", "recent question", "recent answer", "the run"], fit.Messages!.Select(m => m.Text));
+
+        var tooSmall = ContextWindowFitter.Fit(new PromptLayout(messages, 1, 4, false), 3, 1);
+        Assert.Null(tooSmall.Messages);
+        Assert.True(tooSmall.RequiredTokens > 2);
     }
 
     [Fact]
@@ -459,7 +482,7 @@ public sealed class ContextAndCompactionTests
     {
         static ConversationEntry E(long seq, string turn) => new(seq, turn, AgentName, null, DateTimeOffset.UnixEpoch, new WorkflowChatMessage { Role = "user" });
 
-        var turns = CompactConversationActivity.SplitTurns([E(0, "a"), E(1, "a"), E(2, "b"), E(3, "c"), E(4, "c")]);
+        var turns = CompactConversationActivity.SplitTurnsByTurnId([E(0, "a"), E(1, "a"), E(2, "b"), E(3, "c"), E(4, "c")]);
 
         Assert.Equal([2, 1, 2], turns.Select(t => t.Count));
     }
