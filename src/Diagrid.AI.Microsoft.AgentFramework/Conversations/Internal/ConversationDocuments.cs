@@ -27,6 +27,12 @@ internal sealed class ConversationManifest
 {
     public const int CurrentVersion = 1;
 
+    /// <summary>
+    /// How many summary records <see cref="Summaries"/> keeps. It bounds a persisted document; a load pinned to a
+    /// prefix whose summary was dropped fails (<see cref="SummariesDroppedMax"/>).
+    /// </summary>
+    public const int MaxSummaries = 32;
+
     [JsonPropertyName("version")]
     public int Version { get; set; } = CurrentVersion;
 

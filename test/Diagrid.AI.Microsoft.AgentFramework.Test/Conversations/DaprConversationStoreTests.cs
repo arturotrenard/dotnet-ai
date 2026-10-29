@@ -1327,6 +1327,18 @@ public sealed class DaprConversationStoreTests
         Assert.Empty(await store.LoadEntriesAsync("missing", 0, cancellationToken: TestContext.Current.CancellationToken));
     }
 
+    [Fact]
+    public async Task LoadEntries_GapInTheEntries_IsReportedAsCorruption_LikeLoad()
+    {
+        var store = CreateStore();
+        await store.AppendTurnAsync(Turn("t1", 0, User("a"), Assistant("b"), User("c")), TestContext.Current.CancellationToken);
+        RewriteChunk(chunk => chunk.Entries.RemoveAt(1));
+
+        var ex = await Assert.ThrowsAsync<ConversationStoreException>(
+            () => store.LoadEntriesAsync(ConversationId, 0, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Contains("corrupt", ex.Message, StringComparison.Ordinal);
+    }
+
     private void RewriteChunk(Action<ConversationChunk> change)
     {
         var chunkKey = ChunkKeys().Single();

@@ -20,6 +20,16 @@ namespace Diagrid.AI.Microsoft.AgentFramework.Conversations;
 /// <c>WithConversationStore(...)</c> registers the Dapr state store implementation. Register your own
 /// implementation before calling it to replace that one.
 /// </remarks>
+/// <remarks>
+/// <para>
+/// To plug in your own store, register it before <c>WithConversationStore(...)</c>. What the runtime calls:
+/// <see cref="LoadAsync"/> and <see cref="AppendTurnAsync"/> on every run with a conversation;
+/// <see cref="DeleteAsync"/> from <c>DeleteConversationAsync</c>; <see cref="AppendSummaryAsync"/> only with
+/// <c>WithConversationCompaction</c>. <see cref="LoadEntriesAsync"/> is never called by the runtime; it is for your
+/// own code (a full transcript). A store for agents without compaction can throw
+/// <see cref="NotSupportedException"/> from the members it is not asked for.
+/// </para>
+/// </remarks>
 public interface IConversationStore
 {
     /// <summary>

@@ -24,6 +24,7 @@ namespace Diagrid.AI.Microsoft.AgentFramework.Runtime;
 /// <param name="Effort">The reasoning effort to request.</param>
 /// <param name="Output">The reasoning output to request, or <see langword="null"/> for the provider's default.</param>
 internal sealed record ReasoningEffortRegistration(string? AgentName, ReasoningEffort Effort, ReasoningOutput? Output)
+    : IAgentScopedRegistration
 {
     /// <summary>
     /// Returns the reasoning options for <paramref name="agentName"/>. The effort and the output are
@@ -39,19 +40,7 @@ internal sealed record ReasoningEffortRegistration(string? AgentName, ReasoningE
         string agentName,
         ReasoningOptions? agentOptions)
     {
-        ReasoningEffortRegistration? fallback = null;
-        ReasoningEffortRegistration? named = null;
-        foreach (var registration in registrations)
-        {
-            if (registration.AgentName is null)
-            {
-                fallback = registration;
-            }
-            else if (string.Equals(registration.AgentName, agentName, StringComparison.OrdinalIgnoreCase))
-            {
-                named = registration;
-            }
-        }
+        var (named, fallback) = AgentScopedRegistration.Find(registrations, agentName);
 
         // A new instance, so the call never shares the agent's registered options.
         var effort = named?.Effort ?? agentOptions?.Effort ?? fallback?.Effort;
@@ -81,7 +70,7 @@ internal sealed record ReasoningEffortRegistration(string? AgentName, ReasoningE
 /// </summary>
 /// <param name="AgentName">The agent the setting applies to, or <see langword="null"/> for all agents.</param>
 /// <param name="Replay">How much reasoning to send back.</param>
-internal sealed record ReasoningReplayRegistration(string? AgentName, ReasoningReplay Replay)
+internal sealed record ReasoningReplayRegistration(string? AgentName, ReasoningReplay Replay) : IAgentScopedRegistration
 {
     /// <summary>
     /// Returns the setting for <paramref name="agentName"/>: the last registration naming it, else
@@ -89,21 +78,7 @@ internal sealed record ReasoningReplayRegistration(string? AgentName, ReasoningR
     /// </summary>
     internal static ReasoningReplay Resolve(IEnumerable<ReasoningReplayRegistration> registrations, string agentName)
     {
-        ReasoningReplay? fallback = null;
-        ReasoningReplay? named = null;
-        foreach (var registration in registrations)
-        {
-            if (registration.AgentName is null)
-            {
-                fallback = registration.Replay;
-            }
-            else if (string.Equals(registration.AgentName, agentName, StringComparison.OrdinalIgnoreCase))
-            {
-                named = registration.Replay;
-            }
-        }
-
-        return named ?? fallback ?? ReasoningReplay.AcrossTurns;
+        return AgentScopedRegistration.Resolve(registrations, agentName)?.Replay ?? ReasoningReplay.AcrossTurns;
     }
 
     /// <summary>Throws unless <paramref name="replay"/> is a defined value.</summary>

@@ -131,13 +131,6 @@ internal sealed class DaprConversationStateBackend(
         return true;
     }
 
-    public async Task DeleteAsync(string key, CancellationToken cancellationToken)
-    {
-        await client.DeleteStateAsync(_storeName, key, stateOptions: null, metadata: null, cancellationToken)
-            .ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
-    }
-
     public async Task DeleteBulkAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken)
     {
         if (keys.Count == 0)

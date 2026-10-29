@@ -183,17 +183,6 @@ internal sealed class InMemoryConversationStateBackend : IConversationStateBacke
     public Task<bool> TryCreateAsync(string key, JsonElement value, int? ttlSeconds, CancellationToken cancellationToken) =>
         Conditional(key, value, ttlSeconds, "trycreate", existing => existing is null);
 
-    public Task DeleteAsync(string key, CancellationToken cancellationToken)
-    {
-        lock (_gate)
-        {
-            Log.Add($"delete:{key}");
-            _items.Remove(key);
-        }
-
-        return Task.CompletedTask;
-    }
-
     public Task DeleteBulkAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken)
     {
         lock (_gate)

@@ -35,9 +35,6 @@ internal interface IConversationStateBackend
     /// <summary>Writes a value only if the key is absent; false when it exists.</summary>
     Task<bool> TryCreateAsync(string key, JsonElement value, int? ttlSeconds, CancellationToken cancellationToken);
 
-    /// <summary>Deletes a value; deleting an absent key succeeds.</summary>
-    Task DeleteAsync(string key, CancellationToken cancellationToken);
-
     /// <summary>Deletes several values.</summary>
     Task DeleteBulkAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken);
 }
