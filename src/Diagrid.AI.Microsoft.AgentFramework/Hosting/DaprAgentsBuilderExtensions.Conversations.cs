@@ -65,7 +65,7 @@ public static partial class DaprAgentsBuilderExtensions
         configure?.Invoke(options);
         options.Validate();
 
-        GetServices(builder).TryAddSingleton<IConversationStore>(sp => new DaprConversationStore(
+        AgentComponentRegistrar.GetServices(builder).TryAddSingleton<IConversationStore>(sp => new DaprConversationStore(
             new DaprConversationStateBackend(sp.GetRequiredService<DaprStateManagementClient>(), options),
             options,
             sp.GetService<TimeProvider>() ?? TimeProvider.System,
@@ -103,7 +103,7 @@ public static partial class DaprAgentsBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ContextWindowRegistration.Validate(maxContextTokens, maxOutputTokens);
 
-        GetServices(builder).AddSingleton(new ContextWindowRegistration(null, maxContextTokens, maxOutputTokens));
+        AgentComponentRegistrar.GetServices(builder).AddSingleton(new ContextWindowRegistration(null, maxContextTokens, maxOutputTokens));
 
         return builder;
     }
@@ -124,7 +124,7 @@ public static partial class DaprAgentsBuilderExtensions
         ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
         ContextWindowRegistration.Validate(maxContextTokens, maxOutputTokens);
 
-        GetServices(builder).AddSingleton(new ContextWindowRegistration(agentName, maxContextTokens, maxOutputTokens));
+        AgentComponentRegistrar.GetServices(builder).AddSingleton(new ContextWindowRegistration(agentName, maxContextTokens, maxOutputTokens));
 
         return builder;
     }
@@ -149,7 +149,7 @@ public static partial class DaprAgentsBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(configure);
 
-        GetServices(builder).AddSingleton(new ConversationCompactionRegistration(null, BuildCompactionOptions(configure)));
+        AgentComponentRegistrar.GetServices(builder).AddSingleton(new ConversationCompactionRegistration(null, BuildCompactionOptions(configure)));
 
         return builder;
     }
@@ -169,7 +169,7 @@ public static partial class DaprAgentsBuilderExtensions
         ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
         ArgumentNullException.ThrowIfNull(configure);
 
-        GetServices(builder).AddSingleton(new ConversationCompactionRegistration(agentName, BuildCompactionOptions(configure)));
+        AgentComponentRegistrar.GetServices(builder).AddSingleton(new ConversationCompactionRegistration(agentName, BuildCompactionOptions(configure)));
 
         return builder;
     }

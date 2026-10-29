@@ -10,6 +10,8 @@
 // On the Change Date, this software will be available under
 // the Apache License, Version 2.0.
 
+using Diagrid.AI.Microsoft.AgentFramework.Conversations.Internal;
+
 namespace Diagrid.AI.Microsoft.AgentFramework.Conversations;
 
 /// <summary>
@@ -80,7 +82,7 @@ public sealed class DaprConversationStoreOptions
         }
 
         ArgumentNullException.ThrowIfNull(KeyPrefix, nameof(KeyPrefix));
-        if (KeyPrefix.AsSpan().IndexOfAny("|#") >= 0)
+        if (KeyPrefix.AsSpan().IndexOfAny(ConversationKeys.ReservedCharacters) >= 0)
         {
             throw new ArgumentException($"{nameof(KeyPrefix)} cannot contain '|' or '#'.", nameof(KeyPrefix));
         }

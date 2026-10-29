@@ -482,7 +482,7 @@ public sealed class ContextAndCompactionTests
     {
         static ConversationEntry E(long seq, string turn) => new(seq, turn, AgentName, null, DateTimeOffset.UnixEpoch, new WorkflowChatMessage { Role = "user" });
 
-        var turns = CompactConversationActivity.SplitTurnsByTurnId([E(0, "a"), E(1, "a"), E(2, "b"), E(3, "c"), E(4, "c")]);
+        var turns = CompactionPlanner.SplitTurnsByTurnId([E(0, "a"), E(1, "a"), E(2, "b"), E(3, "c"), E(4, "c")]);
 
         Assert.Equal([2, 1, 2], turns.Select(t => t.Count));
     }
@@ -567,12 +567,12 @@ public sealed class ContextAndCompactionTests
             [new(seq, id, AgentName, null, DateTimeOffset.UnixEpoch, new WorkflowChatMessage { Role = "user", Content = new string('x', size * 4) })];
         var turns = new List<List<ConversationEntry>> { Turn("a", 0, 10), Turn("b", 1, 10), Turn("c", 2, 300), Turn("d", 3, 300) };
 
-        var plan = CompactConversationActivity.PlanCompaction(turns, null,
+        var plan = CompactionPlanner.PlanCompaction(turns, null,
             new ConversationCompactionOptions { TriggerTokens = 400, KeepRecentTurns = 4 });
 
         // Half the trigger is 200 tokens: only the latest 300-token turn is kept.
         Assert.Equal(3, plan!.Value.CoversUpTo);
-        Assert.Null(CompactConversationActivity.PlanCompaction([Turn("only", 0, 10)], null,
+        Assert.Null(CompactionPlanner.PlanCompaction([Turn("only", 0, 10)], null,
             new ConversationCompactionOptions { TriggerTokens = 1, KeepRecentTurns = 1 }));
     }
 

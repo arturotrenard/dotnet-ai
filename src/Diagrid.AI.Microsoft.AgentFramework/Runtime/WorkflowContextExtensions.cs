@@ -62,11 +62,7 @@ public static partial class WorkflowContextExtensions
         AgentRunOptions? options = null)
     {
         var result = await context.CallChildWorkflowAsync<AgentRunResult>(nameof(AgentRunWorkflow),
-            new DaprAgentInvocation(agent.Name, message, SessionForInput(session), options)
-            {
-                ChatClientKey = GetChatClientKey(agent),
-                ConversationId = session.GetConversationId(),
-            });
+            CreateInvocation(agent, message, options, SessionForInput(session), conversationId: session.GetConversationId()));
         return result.Response;
     }
 
@@ -92,12 +88,8 @@ public static partial class WorkflowContextExtensions
         ArgumentNullException.ThrowIfNull(telemetryBaggage);
 
         var result = await context.CallChildWorkflowAsync<AgentRunResult>(nameof(AgentRunWorkflow),
-            new DaprAgentInvocation(agent.Name, message, SessionForInput(session), options)
-            {
-                ChatClientKey = GetChatClientKey(agent),
-                ConversationId = session.GetConversationId(),
-                TelemetryBaggage = AgentTelemetryBaggage.Copy(telemetryBaggage)
-            });
+            CreateInvocation(agent, message, options, SessionForInput(session), conversationId: session.GetConversationId(),
+                telemetryBaggage: telemetryBaggage));
         return result.Response;
     }
 
@@ -122,12 +114,7 @@ public static partial class WorkflowContextExtensions
         IReadOnlyDictionary<string, string?>? telemetryBaggage = null) =>
         context.CallChildWorkflowAsync<AgentRunResult>(
             nameof(AgentRunWorkflow),
-            new DaprAgentInvocation(agent.Name, message, Session: null, Options: options)
-            {
-                ChatClientKey = GetChatClientKey(agent),
-                PriorMessages = priorMessages,
-                TelemetryBaggage = AgentTelemetryBaggage.Copy(telemetryBaggage)
-            });
+            CreateInvocation(agent, message, options, priorMessages: priorMessages, telemetryBaggage: telemetryBaggage));
 
     /// <summary>
     /// Invokes an agent as a child workflow against a stored conversation. The agent sees every turn already
@@ -168,12 +155,7 @@ public static partial class WorkflowContextExtensions
 
         return context.CallChildWorkflowAsync<AgentRunResult>(
             nameof(AgentRunWorkflow),
-            new DaprAgentInvocation(agent.Name, message, Session: null, Options: options)
-            {
-                ChatClientKey = GetChatClientKey(agent),
-                ConversationId = conversationId,
-                TelemetryBaggage = AgentTelemetryBaggage.Copy(telemetryBaggage)
-            });
+            CreateInvocation(agent, message, options, conversationId: conversationId, telemetryBaggage: telemetryBaggage));
     }
 
     /// <summary>
@@ -232,11 +214,7 @@ public static partial class WorkflowContextExtensions
         return context.ScheduleNewDetachedWorkflowAsync(
             nameof(AgentRunWorkflow),
             instanceId,
-            new DaprAgentInvocation(agent.Name, message, Session: null, Options: options)
-            {
-                ChatClientKey = GetChatClientKey(agent),
-                TelemetryBaggage = AgentTelemetryBaggage.Copy(telemetryBaggage)
-            });
+            CreateInvocation(agent, message, options, telemetryBaggage: telemetryBaggage));
     }
 
     /// <summary>
@@ -307,6 +285,27 @@ public static partial class WorkflowContextExtensions
     /// </summary>
     private static AgentSession? SessionForInput(AgentSession? session) =>
         session.GetConversationId() is null ? session : null;
+
+    /// <summary>
+    /// The input of an <see cref="AgentRunWorkflow"/> started for <paramref name="agent"/>. Each caller passes only what
+    /// it carries; the rest stays <see langword="null"/>, as the property initializers it replaces left it. The baggage is
+    /// copied, and no baggage, or an empty one, leaves <see cref="DaprAgentInvocation.TelemetryBaggage"/> unset.
+    /// </summary>
+    internal static DaprAgentInvocation CreateInvocation(
+        IDaprAIAgent agent,
+        string? message,
+        AgentRunOptions? options,
+        AgentSession? session = null,
+        string? conversationId = null,
+        List<WorkflowChatMessage>? priorMessages = null,
+        IReadOnlyDictionary<string, string?>? telemetryBaggage = null) =>
+        new(agent.Name, message, session, options)
+        {
+            ChatClientKey = GetChatClientKey(agent),
+            ConversationId = conversationId,
+            PriorMessages = priorMessages,
+            TelemetryBaggage = AgentTelemetryBaggage.Copy(telemetryBaggage)
+        };
 
     private static string? GetChatClientKey(IDaprAIAgent agent) =>
         agent is DaprAIAgent daprAgent ? daprAgent.ChatClientKey : null;

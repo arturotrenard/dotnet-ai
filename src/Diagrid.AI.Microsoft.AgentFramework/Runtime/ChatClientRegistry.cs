@@ -45,6 +45,11 @@ internal sealed class ChatClientRegistry
     /// Agents already warned that their chat client ignores the reasoning effort, so
     /// <see cref="CallLlmActivity"/> warns once per agent and host rather than on every LLM call.
     /// </summary>
+    /// <remarks>
+    /// It lives here, not on <see cref="CallLlmActivity"/>, because an activity keeps no state from one call to the
+    /// next, while this registry is the host-wide singleton already keyed by agent name; a set of its own would be one
+    /// more singleton to register for a single flag per agent.
+    /// </remarks>
     internal ConcurrentDictionary<string, bool> WarnedIgnoredReasoningEffort { get; } =
         new(StringComparer.OrdinalIgnoreCase);
 
