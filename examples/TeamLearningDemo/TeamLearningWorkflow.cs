@@ -53,13 +53,18 @@ public sealed class TeamLearningWorkflow : Workflow<LearnRequest, LearnResult>
                       + "Find the weakness that matters most (a large group of windows with low precision) and propose "
                       + "parameter changes for one side aimed at it.";
         JsonObject? proposal = null;
+        string? side = null;
+        JsonObject? changes = null;
         var verdict = new ProposalVerdict(false, false, "{}");
         for (var attempt = 1; attempt <= EngineerAttempts; attempt++)
         {
             var turn = await context.RunAgentWithHistoryAsync(engineer, message, history);
             history.AddRange(turn.TurnMessages);
             proposal = ParseObject(turn.Response.Text);
-            if (proposal?["side"]?.GetValue<string>() is not { } side || proposal["changes"] is not JsonObject changes)
+            // A model can answer "side": 1 or "side": {...}; that is a malformed answer to retry, not a crash.
+            side = proposal?["side"] is JsonValue sideValue && sideValue.TryGetValue<string>(out var text) ? text : null;
+            changes = proposal?["changes"] as JsonObject;
+            if (side is null || changes is null)
             {
                 message = """Answer with only the JSON object: {"side": "...", "changes": {...}, "rationale": "..."}.""";
                 continue;
@@ -83,11 +88,10 @@ public sealed class TeamLearningWorkflow : Workflow<LearnRequest, LearnResult>
 
         // 4. Publish only what the backtest promoted.
         var version = baseline.Version;
-        if (verdict.Promote && proposal is not null)
+        if (verdict.Promote && proposal is not null && side is not null && changes is not null)
         {
             version = await context.CallActivityAsync<int>(nameof(PublishActivity), new PublishInput(runId, baseline.Version,
-                proposal["side"]!.GetValue<string>(), proposal["changes"]!.ToJsonString(),
-                proposal["rationale"]?.ToString() ?? "", lesson));
+                side, changes.ToJsonString(), proposal["rationale"]?.ToString() ?? "", lesson));
         }
         return new LearnResult(taskReport, proposal?.ToJsonString(), stage, verdict.ResultJson, verdict.Promote, version, lesson);
     }
@@ -103,9 +107,12 @@ public sealed class TeamLearningWorkflow : Workflow<LearnRequest, LearnResult>
         }
         try
         {
-            return JsonNode.Parse(text![start..(end + 1)]) as JsonObject;
+            // JsonObject reads its properties lazily: a duplicate key throws on first access, so read them here.
+            var parsed = JsonNode.Parse(text![start..(end + 1)]) as JsonObject;
+            _ = parsed?.Count;
+            return parsed;
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is JsonException or ArgumentException)
         {
             return null;
         }

@@ -34,11 +34,17 @@ if (args.Contains("--backtest"))
     var backtest = await Backtest.LoadAsync(store);
     Console.WriteLine($"skill v{published.Version}; {backtest.Range}");
     var propose = Array.IndexOf(args, "--propose");
-    if (propose >= 0 && propose + 2 < args.Length)
+    if (propose >= 0)
     {
-        var side = args[propose + 1];
-        var candidate = published.WithChanges(side, System.Text.Json.Nodes.JsonNode.Parse(args[propose + 2])!.AsObject());
-        Console.WriteLine($"{side}: {JsonSerializer.Serialize(backtest.Verdict(side, candidate.For(side), published.For(side)))}");
+        if (propose + 2 >= args.Length)
+        {
+            Console.Error.WriteLine("usage: --backtest --propose <support|resistance> '<changes JSON>'");
+            Environment.ExitCode = 2;
+            return;
+        }
+        var verdict = await ProposalJudge.JudgeAsync(published, args[propose + 1], args[propose + 2], () => Task.FromResult(backtest));
+        Console.WriteLine($"valid {verdict.Valid}, promote {verdict.Promote}: {verdict.ResultJson}");
+        Environment.ExitCode = verdict.Valid ? 0 : 2;
         return;
     }
     foreach (var side in Levels.Sides)

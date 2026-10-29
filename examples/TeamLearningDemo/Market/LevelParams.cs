@@ -123,7 +123,13 @@ public sealed record LevelParams
 /// <summary>A published skill version: <c>params.json</c> holds a version number and per-side overrides.</summary>
 public sealed record SkillParams(int Version, LevelParams Support, LevelParams Resistance, JsonObject Document)
 {
-    public LevelParams For(string side) => side == "support" ? Support : Resistance;
+    /// <summary>The parameters for <paramref name="side"/>; any other name than the two sides is an error.</summary>
+    public LevelParams For(string side) => side switch
+    {
+        "support" => Support,
+        "resistance" => Resistance,
+        _ => throw UnknownSide(side),
+    };
 
     public static SkillParams Parse(string json)
     {
@@ -138,6 +144,10 @@ public sealed record SkillParams(int Version, LevelParams Support, LevelParams R
     /// <summary>A candidate version: the same document with one side's overrides changed.</summary>
     public SkillParams WithChanges(string side, JsonObject changes)
     {
+        if (!Levels.Sides.Contains(side))
+        {
+            throw UnknownSide(side);
+        }
         var doc = (JsonObject)Document.DeepClone();
         var sideDoc = doc[side] as JsonObject ?? new JsonObject();
         foreach (var (key, value) in changes)
@@ -147,6 +157,9 @@ public sealed record SkillParams(int Version, LevelParams Support, LevelParams R
         doc[side] = sideDoc;
         return Parse(doc.ToJsonString());
     }
+
+    private static ArgumentException UnknownSide(string? side) =>
+        new($"side must be \"support\" or \"resistance\", not \"{side}\"");
 
     public string ToJson() => Document.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
 }

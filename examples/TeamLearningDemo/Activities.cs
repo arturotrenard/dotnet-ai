@@ -55,38 +55,7 @@ public sealed class EvaluateProposalActivity(CandleStore store, TeamPaths paths)
     public override async Task<ProposalVerdict> RunAsync(WorkflowActivityContext context, ProposalInput input)
     {
         var published = SkillParams.Parse(await File.ReadAllTextAsync(paths.ParamsFile));
-        SkillParams candidate;
-        try
-        {
-            if (!Levels.Sides.Contains(input.Side))
-            {
-                throw new ArgumentException("side must be \"support\" or \"resistance\"");
-            }
-            var changes = JsonNode.Parse(input.ChangesJson) as JsonObject
-                          ?? throw new ArgumentException("changes must be a JSON object");
-            if (changes.Count == 0)
-            {
-                throw new ArgumentException("changes is empty: propose at least one parameter");
-            }
-            candidate = published.WithChanges(input.Side, changes);
-        }
-        catch (Exception ex) when (ex is ArgumentException or JsonException or FormatException or InvalidOperationException)
-        {
-            return new ProposalVerdict(false, false, new JsonObject { ["error"] = ex.Message }.ToJsonString());
-        }
-
-        var backtest = await Backtest.LoadAsync(store);
-        var verdict = backtest.Verdict(input.Side, candidate.For(input.Side), published.For(input.Side));
-        var train = Backtest.Summarize(backtest.Evaluate(backtest.Train, candidate.For(input.Side), input.Side));
-        var trainPublished = Backtest.Summarize(backtest.Evaluate(backtest.Train, published.For(input.Side), input.Side));
-        var result = new JsonObject
-        {
-            ["side"] = input.Side,
-            ["test"] = JsonSerializer.SerializeToNode(verdict),
-            ["train"] = JsonSerializer.SerializeToNode(train),
-            ["trainPublished"] = JsonSerializer.SerializeToNode(trainPublished),
-        };
-        return new ProposalVerdict(true, verdict.Ready, result.ToJsonString());
+        return await ProposalJudge.JudgeAsync(published, input.Side, input.ChangesJson, () => Backtest.LoadAsync(store));
     }
 }
 
