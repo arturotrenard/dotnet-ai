@@ -31,6 +31,11 @@ public sealed record SideVerdict(
     [property: JsonPropertyName("checks")] Dictionary<string, bool> Checks,
     [property: JsonPropertyName("ready")] bool Ready);
 
+/// <summary>How one side's recommendation at one cutoff fared over the next 24 hours.</summary>
+/// <param name="Zone">The recommended zone, or null when the side abstained.</param>
+/// <param name="Context">The window's context, for grouping outcomes by regime.</param>
+public sealed record WindowOutcome(Zone? Zone, bool Touched, bool Hit, WindowContext Context);
+
 /// <summary>
 /// Replays every daily cutoff of 2026 and scores the zones against the next 24 hours.
 /// </summary>
@@ -69,20 +74,29 @@ public sealed class Backtest
     public IReadOnlyList<int> Test { get; }
     public string Range => $"train {Train.Count} ({CandleStore.Iso(_candles[Train[0]].T)}..), test {Test.Count} (..{CandleStore.Iso(_candles[Test[^1]].T)})";
 
-    /// <summary>All 2026 candles up to the last UTC midnight.</summary>
-    public static async Task<Backtest> LoadAsync(CandleStore store, CancellationToken cancellationToken = default)
+    /// <summary>All 2026 candles up to the last UTC midnight at or before <paramref name="asOf"/>.</summary>
+    /// <param name="asOf">
+    /// Fixes the data window. The CLI passes now; a learning run passes one value for all its activities, so a
+    /// run that crosses a daily close still judges the baseline and every candidate on the same split.
+    /// </param>
+    public static async Task<Backtest> LoadAsync(CandleStore store, DateTimeOffset asOf, CancellationToken cancellationToken = default)
     {
-        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // An activity input scheduled before the run pinned its data window has no end: fail here, clearly.
+        if (asOf == default)
+        {
+            throw new ArgumentException("the backtest needs the run's data end; this input predates it", nameof(asOf));
+        }
+        var now = asOf.ToUnixTimeMilliseconds();
         return new Backtest(await store.LoadAsync(DataStart, now - now % CandleStore.DayMs, cancellationToken));
     }
 
-    public List<(Zone? Zone, bool Touched, bool Hit, WindowContext Context)> Evaluate(IReadOnlyList<int> cutoffs, LevelParams p, string side)
+    public List<WindowOutcome> Evaluate(IReadOnlyList<int> cutoffs, LevelParams p, Side side)
     {
         WindowContext ContextAt(int i)
         {
             if (!_contexts.TryGetValue((i, p), out var ctx))
             {
-                ctx = Levels.Context(Window(i), p);
+                ctx = Levels.Context(Levels.Window(_candles, i), p);
                 _contexts[(i, p)] = ctx;
             }
             return ctx;
@@ -92,11 +106,11 @@ public sealed class Backtest
         {
             var (zone, _) = Levels.Recommend(_candles, i, side, p, ContextAt);
             var (touched, hit) = zone is null ? (false, false) : Outcome(zone.ZoneLow, zone.ZoneHigh, i, side);
-            return (zone, touched, hit, ContextAt(i));
+            return new WindowOutcome(zone, touched, hit, ContextAt(i));
         }).ToList();
     }
 
-    public static Summary Summarize<T>(IReadOnlyCollection<(Zone? Zone, bool Touched, bool Hit, T _)> rows)
+    public static Summary Summarize(IReadOnlyCollection<WindowOutcome> rows)
     {
         var n = rows.Count;
         var touched = rows.Count(r => r.Touched);
@@ -106,7 +120,7 @@ public sealed class Backtest
     }
 
     /// <summary>Readiness on test for one side, optionally against a baseline (the published version).</summary>
-    public SideVerdict Verdict(string side, LevelParams candidate, LevelParams? baseline, double alpha = Alpha)
+    public SideVerdict Verdict(Side side, LevelParams candidate, LevelParams? baseline, double alpha = Alpha)
     {
         var rows = Evaluate(Test, candidate, side);
         var s = Summarize(rows);
@@ -125,13 +139,13 @@ public sealed class Backtest
     }
 
     /// <summary>Precision and coverage on train by trend, volatility, method and source: where the skill fails.</summary>
-    public Dictionary<string, Dictionary<string, Summary>> RegimeReport(LevelParams p, string side)
+    public Dictionary<string, Dictionary<string, Summary>> RegimeReport(LevelParams p, Side side)
     {
         var rows = Evaluate(Train, p, side);
-        var dims = new Dictionary<string, Func<(Zone? Zone, bool, bool, WindowContext Ctx), string>>
+        var dims = new Dictionary<string, Func<WindowOutcome, string>>
         {
-            ["trend7d"] = r => r.Ctx.Return7dPct < -3 ? "down<-3%" : r.Ctx.Return7dPct < 3 ? "flat" : "up>3%",
-            ["atrPct"] = r => r.Ctx.AtrPct < 0.25 ? "low<0.25" : r.Ctx.AtrPct < 0.45 ? "mid" : "high>0.45",
+            ["trend7d"] = r => r.Context.Return7dPct < -3 ? "down<-3%" : r.Context.Return7dPct < 3 ? "flat" : "up>3%",
+            ["atrPct"] = r => r.Context.AtrPct < 0.25 ? "low<0.25" : r.Context.AtrPct < 0.45 ? "mid" : "high>0.45",
             ["method"] = r => r.Zone?.Method ?? "none (abstained)",
             ["source"] = r => r.Zone?.Source ?? "none (abstained)",
         };
@@ -139,22 +153,20 @@ public sealed class Backtest
             .ToDictionary(g => g.Key, g => Summarize(g.ToList())));
     }
 
-    private IReadOnlyList<Candle> Window(int i) => _candles.Skip(i - Levels.Bars).Take(Levels.Bars).ToList();
-
-    private (bool Touched, bool Hit) Outcome(double zl, double zh, int i, string side)
+    private (bool Touched, bool Hit) Outcome(double zl, double zh, int i, Side side)
     {
         bool touched = false, broken = false;
         for (var k = i; k < i + Levels.DayBars; k++)
         {
             var c = _candles[k];
-            touched |= side == "support" ? c.L <= zh : c.H >= zl;
-            broken |= side == "support" ? c.C < zl : c.C > zh;
+            touched |= side == Side.Support ? c.L <= zh : c.H >= zl;
+            broken |= side == Side.Support ? c.C < zl : c.C > zh;
         }
         return (touched, touched && !broken);
     }
 
     /// <summary>Precision of a zone placed uniformly at random among all valid zones (0.05% grid).</summary>
-    private double BaseRate(IReadOnlyList<int> cutoffs, string side)
+    private double BaseRate(IReadOnlyList<int> cutoffs, Side side)
     {
         int hits = 0, touched = 0;
         foreach (var i in cutoffs)
@@ -163,7 +175,7 @@ public sealed class Backtest
             for (var step = 0; step <= 50; step++)
             {
                 double zl, zh;
-                if (side == "support")
+                if (side == Side.Support)
                 {
                     zh = last * (1 - step * 0.0005);
                     zl = zh * (1 - Levels.MaxWidthPct / 100);
@@ -207,8 +219,7 @@ public sealed class Backtest
     }
 
     /// <summary>One-sided (1 - alpha) lower bound of precision(candidate) - precision(baseline), paired by window.</summary>
-    private static double BootstrapLowerBound<T>(
-        List<(Zone? Zone, bool Touched, bool Hit, T C)> candidate, List<(Zone? Zone, bool Touched, bool Hit, T C)> baseline, double alpha)
+    private static double BootstrapLowerBound(List<WindowOutcome> candidate, List<WindowOutcome> baseline, double alpha)
     {
         var rng = new Random(7);  // fixed seed: the same inputs always give the same verdict
         var n = candidate.Count;

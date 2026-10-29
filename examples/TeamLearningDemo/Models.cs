@@ -31,15 +31,22 @@ public sealed record LearnResult(
 
 // ---------------------------------------------------------------- activity input/output
 
+/// <param name="DataEnd">The run's backtest data window ends at the last UTC midnight at or before this.</param>
+public sealed record BaselineInput(
+    [property: JsonPropertyName("runId")] string RunId,
+    [property: JsonPropertyName("dataEnd")] DateTimeOffset DataEnd);
+
 public sealed record Baseline(
     [property: JsonPropertyName("version")] int Version,
     [property: JsonPropertyName("verdictJson")] string VerdictJson,
     [property: JsonPropertyName("reportJson")] string ReportJson);
 
 /// <param name="ChangesJson">A JSON object of parameter overrides, e.g. {"trend_gate_pct": 3}.</param>
+/// <param name="DataEnd">The same backtest data window the baseline was scored on.</param>
 public sealed record ProposalInput(
     [property: JsonPropertyName("side")] string Side,
-    [property: JsonPropertyName("changesJson")] string ChangesJson);
+    [property: JsonPropertyName("changesJson")] string ChangesJson,
+    [property: JsonPropertyName("dataEnd")] DateTimeOffset DataEnd);
 
 /// <param name="Valid">False when the proposal used unknown parameters or values out of range.</param>
 /// <param name="ResultJson">The validation error, or the backtest verdict against the published version.</param>

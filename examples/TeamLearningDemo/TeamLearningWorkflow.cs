@@ -36,8 +36,11 @@ public sealed class TeamLearningWorkflow : Workflow<LearnRequest, LearnResult>
         var runId = context.InstanceId;
         var cutoff = (input.Cutoff?.ToUniversalTime() ?? context.CurrentUtcDateTime.Date)
             .ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+        // The backtest's data window, fixed once per run (replay-safe): every activity scores on the same split,
+        // even when the run crosses a daily close between the baseline and a later proposal.
+        var dataEnd = new DateTimeOffset(context.CurrentUtcDateTime.Date, TimeSpan.Zero);
 
-        var baseline = await context.CallActivityAsync<Baseline>(nameof(PrepareBaselineActivity), runId);
+        var baseline = await context.CallActivityAsync<Baseline>(nameof(PrepareBaselineActivity), new BaselineInput(runId, dataEnd));
 
         // 1. The task, done with the published skill.
         var analyst = await context.RunAgentAsync(context.GetAgent("AnalystAgent"),
@@ -70,7 +73,7 @@ public sealed class TeamLearningWorkflow : Workflow<LearnRequest, LearnResult>
                 continue;
             }
             verdict = await context.CallActivityAsync<ProposalVerdict>(nameof(EvaluateProposalActivity),
-                new ProposalInput(side, changes.ToJsonString()));
+                new ProposalInput(side, changes.ToJsonString(), dataEnd));
             if (verdict.Valid)
             {
                 break;

@@ -11,6 +11,7 @@
 // the Apache License, Version 2.0.
 
 using System.ComponentModel;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Agents.AI;
@@ -35,12 +36,13 @@ public sealed class BtcSupportResistanceSkill(CandleStore store, TeamPaths paths
                      + "Use it whenever a task asks about Bitcoin or BTC support, resistance, key levels or price "
                      + "zones, or about broken levels turning into support or resistance.");
 
-    protected override string Instructions => """
+    // The numbers come from the constants the script uses, so the instructions cannot drift from the code.
+    protected override string Instructions => string.Create(CultureInfo.InvariantCulture, $$"""
         Answer with the `levels` script; never compute levels, distances or percentages yourself, and never
         quote prices from memory. Pass the cutoff as an ISO-8601 UTC time such as 2026-10-19T00:00:00Z; it
-        must not be in the future. The window is the 336 closed 30-minute candles (7 days) before it.
+        must not be in the future. The window is the {{Levels.Bars}} closed {{CandleStore.IntervalMs / 60_000}}-minute candles ({{Levels.Bars / Levels.DayBars}} days) before it.
 
-        For each side, `recommended` is the zone to report (at most 0.5% wide, within 3% of the last close),
+        For each side, `recommended` is the zone to report (at most {{Levels.MaxWidthPct}}% wide, within {{Levels.MaxDistancePct}}% of the last close),
         or null with an `abstainReason`: an abstention is a valid answer, report it instead of inventing a
         zone. `method` says where the level came from (swing_low/high, flip_resistance = a broken
         resistance now acting as support, flip_support = the reverse, volume_node, pivot_*), and `source`
@@ -52,7 +54,7 @@ public sealed class BtcSupportResistanceSkill(CandleStore store, TeamPaths paths
          "resistance": {"zoneLow": 0.0, "zoneHigh": 0.0, "method": "", "source": "", "abstainReason": null},
          "notes": "one or two sentences"}
         The `methodology` resource explains how zones are built and how reliable the published version is.
-        """;
+        """);
 
     [AgentSkillScript("levels")]
     [Description("Support and resistance zones for BTCUSDT at a cutoff time, computed from closed Binance 30m candles.")]
@@ -63,12 +65,12 @@ public sealed class BtcSupportResistanceSkill(CandleStore store, TeamPaths paths
         try
         {
             var end = CandleStore.ParseCutoff(cutoff);
-            var published = SkillParams.Parse(await File.ReadAllTextAsync(paths.ParamsFile));
-            var extra = Math.Max(published.Support.CarryDays, published.Resistance.CarryDays) * Levels.DayBars;
-            var candles = await store.LoadAsync(end - (Levels.Bars + extra) * CandleStore.IntervalMs, end);
-            if (candles.Count < Levels.Bars + extra)
+            var published = await SkillParams.LoadAsync(paths.ParamsFile);
+            var required = Levels.Sides.Max(side => Levels.RequiredCandles(published.For(side)));
+            var candles = await store.LoadAsync(end - required * CandleStore.IntervalMs, end);
+            if (candles.Count < required)
             {
-                return Error($"only {candles.Count} of {Levels.Bars + extra} candles available before {CandleStore.Iso(end)}");
+                return Error($"only {candles.Count} of {required} candles available before {CandleStore.Iso(end)}");
             }
 
             var n = candles.Count;
@@ -82,9 +84,9 @@ public sealed class BtcSupportResistanceSkill(CandleStore store, TeamPaths paths
             foreach (var side in Levels.Sides)
             {
                 var p = published.For(side);
-                WindowContext ContextAt(int i) => Levels.Context(candles.Skip(i - Levels.Bars).Take(Levels.Bars).ToList(), p);
+                WindowContext ContextAt(int i) => Levels.Context(Levels.Window(candles, i), p);
                 var (zone, reason) = Levels.Recommend(candles, n, side, p, ContextAt);
-                result[side] = new JsonObject
+                result[side.Name()] = new JsonObject
                 {
                     ["recommended"] = JsonSerializer.SerializeToNode(zone),
                     ["abstainReason"] = reason,

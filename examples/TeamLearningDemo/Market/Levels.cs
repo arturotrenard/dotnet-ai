@@ -16,7 +16,7 @@ namespace TeamLearningDemo.Market;
 
 /// <summary>A support or resistance zone recommended for one side at one cutoff.</summary>
 public sealed record Zone(
-    [property: JsonPropertyName("side")] string Side,
+    [property: JsonPropertyName("side")] Side Side,
     [property: JsonPropertyName("level")] double Level,
     [property: JsonPropertyName("zoneLow")] double ZoneLow,
     [property: JsonPropertyName("zoneHigh")] double ZoneHigh,
@@ -34,7 +34,7 @@ public sealed record WindowContext(
     double LastClose, double AtrPct, double Return7dPct, IReadOnlyList<RawLevel> Levels);
 
 public sealed record RawLevel(
-    double Level, string Side, string Method, int Swings, int LastIdx, double ReactionVolume,
+    double Level, Side Side, string Method, int Swings, int LastIdx, double ReactionVolume,
     double BreakoutVolume, double Recency, int Touches, double Volume, int Confluence);
 
 /// <summary>
@@ -53,7 +53,16 @@ public static class Levels
     public const int DayBars = 48;   // 24h: the evaluation horizon and the carry-over step
     public const double MaxWidthPct = 0.5;
     public const double MaxDistancePct = 3.0;
-    public static readonly string[] Sides = ["support", "resistance"];
+    public static readonly Side[] Sides = [Side.Support, Side.Resistance];
+
+    /// <summary>
+    /// Candles a recommendation for <paramref name="p"/> needs before its cutoff: the window, plus one day
+    /// per carry-over step, since <see cref="Recommend"/> may look back <see cref="LevelParams.CarryDays"/> days.
+    /// </summary>
+    public static int RequiredCandles(LevelParams p) => Bars + p.CarryDays * DayBars;
+
+    /// <summary>The analysis window of the cutoff at index <paramref name="i"/>: candles[i-Bars..i).</summary>
+    public static IReadOnlyList<Candle> Window(IReadOnlyList<Candle> candles, int i) => candles.Skip(i - Bars).Take(Bars).ToList();
 
     public static WindowContext Context(IReadOnlyList<Candle> c, LevelParams p)
     {
@@ -64,28 +73,28 @@ public static class Levels
         var highs = Cluster(c, SwingPoints(c, p.SwingK, low: false), low: false, p.ClusterTolPct, medVol);
         var (nodes, volumeAt) = VolumeProfile(c, p.VpBinPct, last);
 
-        var raw = new List<(double Level, string Side, string Method, int Swings, int LastIdx, double Reaction, double Breakout, double Recency)>();
+        var raw = new List<(double Level, Side Side, string Method, int Swings, int LastIdx, double Reaction, double Breakout, double Recency)>();
         foreach (var s in lows)
         {
-            var side = s.Level < last ? "support" : "resistance";
-            var flip = side == "resistance";  // a swing low above the close is a broken support
+            var side = s.Level < last ? Side.Support : Side.Resistance;
+            var flip = side == Side.Resistance;  // a swing low above the close is a broken support
             raw.Add((s.Level, side, flip ? "flip_support" : "swing_low", s.Swings, s.LastIdx, s.Reaction,
                 flip ? BreakoutVolume(c, s.Level, s.LastIdx, upward: false, medVol) : 0, (double)s.LastIdx / (n - 1)));
         }
         foreach (var s in highs)
         {
-            var side = s.Level > last ? "resistance" : "support";
-            var flip = side == "support";  // a swing high below the close is a broken resistance
+            var side = s.Level > last ? Side.Resistance : Side.Support;
+            var flip = side == Side.Support;  // a swing high below the close is a broken resistance
             raw.Add((s.Level, side, flip ? "flip_resistance" : "swing_high", s.Swings, s.LastIdx, s.Reaction,
                 flip ? BreakoutVolume(c, s.Level, s.LastIdx, upward: true, medVol) : 0, (double)s.LastIdx / (n - 1)));
         }
         foreach (var level in nodes)
         {
-            raw.Add((level, level < last ? "support" : "resistance", "volume_node", 0, 0, 0, 0, 0));
+            raw.Add((level, level < last ? Side.Support : Side.Resistance, "volume_node", 0, 0, 0, 0, 0));
         }
         foreach (var (name, level) in Pivots(c))
         {
-            raw.Add((level, level < last ? "support" : "resistance", "pivot_" + name, 0, 0, 0, 0, 1));
+            raw.Add((level, level < last ? Side.Support : Side.Resistance, "pivot_" + name, 0, 0, 0, 0, 1));
         }
 
         var levels = raw.Select(r => new RawLevel(r.Level, r.Side, r.Method, r.Swings, r.LastIdx, r.Reaction, r.Breakout,
@@ -96,7 +105,7 @@ public static class Levels
     }
 
     /// <summary>Ranked, distinct fresh zones for one side.</summary>
-    public static List<Zone> Candidates(WindowContext ctx, string side, LevelParams p, int top = 5)
+    public static List<Zone> Candidates(WindowContext ctx, Side side, LevelParams p, int top = 5)
     {
         var last = ctx.LastClose;
         var raw = ctx.Levels.Where(r => r.Side == side).ToList();
@@ -142,7 +151,7 @@ public static class Levels
     /// <summary>The zone for the cutoff at index <paramref name="i"/> (window candles[i-Bars..i)), with carry-over.</summary>
     /// <param name="contextAt">context() of the window ending at an index; the backtest passes a cached one.</param>
     public static (Zone? Zone, string? AbstainReason) Recommend(
-        IReadOnlyList<Candle> candles, int i, string side, LevelParams p, Func<int, WindowContext> contextAt, int? depth = null)
+        IReadOnlyList<Candle> candles, int i, Side side, LevelParams p, Func<int, WindowContext> contextAt, int? depth = null)
     {
         depth ??= p.CarryDays;
         var (zone, reason) = Fresh(contextAt(i), side, p);
@@ -162,20 +171,20 @@ public static class Levels
         return (null, reason);
     }
 
-    public static bool WithinConstraints(double zl, double zh, string side, double last)
+    public static bool WithinConstraints(double zl, double zh, Side side, double last)
     {
         if ((zh - zl) / zh * 100 > MaxWidthPct + 1e-9)
         {
             return false;
         }
-        return side == "support"
+        return side == Side.Support
             ? zl < last && zl >= last * (1 - MaxDistancePct / 100)
             : zh > last && zh <= last * (1 + MaxDistancePct / 100);
     }
 
-    private static (Zone?, string?) Fresh(WindowContext ctx, string side, LevelParams p)
+    private static (Zone?, string?) Fresh(WindowContext ctx, Side side, LevelParams p)
     {
-        if ((side == "support" && ctx.Return7dPct < -p.TrendGatePct) || (side == "resistance" && ctx.Return7dPct > p.TrendGatePct))
+        if ((side == Side.Support && ctx.Return7dPct < -p.TrendGatePct) || (side == Side.Resistance && ctx.Return7dPct > p.TrendGatePct))
         {
             return (null, "trend_gate");
         }
@@ -188,11 +197,11 @@ public static class Levels
     }
 
     /// <summary>A carried zone survives if no close broke it since it was issued and it still fits.</summary>
-    private static bool StillValid(Zone zone, IReadOnlyList<Candle> c, int from, int to, string side, double last)
+    private static bool StillValid(Zone zone, IReadOnlyList<Candle> c, int from, int to, Side side, double last)
     {
         for (var k = from; k < to; k++)
         {
-            if ((side == "support" && c[k].C < zone.ZoneLow) || (side == "resistance" && c[k].C > zone.ZoneHigh))
+            if ((side == Side.Support && c[k].C < zone.ZoneLow) || (side == Side.Resistance && c[k].C > zone.ZoneHigh))
             {
                 return false;
             }
@@ -201,10 +210,10 @@ public static class Levels
     }
 
     /// <summary>Zone around a level; the width is a share of zoneHigh so it does not drift with price.</summary>
-    private static (double Low, double High) Place(double level, string side, double last, LevelParams p)
+    private static (double Low, double High) Place(double level, Side side, double last, LevelParams p)
     {
         var w = Math.Min(p.ZoneWidthPct, MaxWidthPct) / 100;
-        if (side == "support")
+        if (side == Side.Support)
         {
             var zh = Math.Min(level * (1 + w * p.ZoneAnchor), last);
             return (zh * (1 - w), zh);

@@ -14,7 +14,7 @@
 // engineer proposes better parameters, a deterministic backtest decides, and the proposal is
 // published as the next skill version only if it is measurably better.
 
-using System.Text.Json;
+using System.Globalization;
 using Dapr.Workflow;
 using Diagrid.AI.Microsoft.AgentFramework.Hosting;
 using TeamLearningDemo;
@@ -25,32 +25,10 @@ var builder = WebApplication.CreateBuilder(args);
 var paths = new TeamPaths(builder.Environment.ContentRootPath);
 var store = new CandleStore(new HttpClient { Timeout = TimeSpan.FromSeconds(30) }, paths.CandleCache);
 
-// Without any agent:
-//   dotnet run -- --backtest                                        score the published skill
-//   dotnet run -- --backtest --propose support '{"min_score": 2}'   judge a proposal like the workflow does
+// Without any agent: dotnet run -- --backtest [--propose <side> '<changes JSON>'] (see BacktestCommand).
 if (args.Contains("--backtest"))
 {
-    var published = SkillParams.Parse(await File.ReadAllTextAsync(paths.ParamsFile));
-    var backtest = await Backtest.LoadAsync(store);
-    Console.WriteLine($"skill v{published.Version}; {backtest.Range}");
-    var propose = Array.IndexOf(args, "--propose");
-    if (propose >= 0)
-    {
-        if (propose + 2 >= args.Length)
-        {
-            Console.Error.WriteLine("usage: --backtest --propose <support|resistance> '<changes JSON>'");
-            Environment.ExitCode = 2;
-            return;
-        }
-        var verdict = await ProposalJudge.JudgeAsync(published, args[propose + 1], args[propose + 2], () => Task.FromResult(backtest));
-        Console.WriteLine($"valid {verdict.Valid}, promote {verdict.Promote}: {verdict.ResultJson}");
-        Environment.ExitCode = verdict.Valid ? 0 : 2;
-        return;
-    }
-    foreach (var side in Levels.Sides)
-    {
-        Console.WriteLine($"{side}: {JsonSerializer.Serialize(backtest.Verdict(side, published.For(side), baseline: null))}");
-    }
+    Environment.ExitCode = await BacktestCommand.RunAsync(args, store, paths);
     return;
 }
 
@@ -80,22 +58,23 @@ builder.Services.AddDaprAgents(registrations: opt =>
     .WithAgent(
         agentName: "EngineerAgent",
         conversationComponentName: "conversation-ollama",
-        instructions: $$"""
+        // The coverage bar and the trend gate's horizon come from the code's constants, not restated here.
+        instructions: string.Create(CultureInfo.InvariantCulture, $$"""
                         You are the team's engineer. You read backtest results of the team's skill and propose new
                         parameters for one side (support or resistance) aimed at where it fails. A precision gain
-                        only counts if coverage stays at or above 70%.
+                        only counts if coverage stays at or above {{Backtest.MinCoverage:0%}}.
 
                         Parameters you may change, with their allowed ranges (anything else is rejected):
                         {{catalogue}}
 
-                        trend_gate_pct makes a side abstain after a 7-day move against it larger than that percent;
+                        trend_gate_pct makes a side abstain after a {{Levels.Bars / Levels.DayBars}}-day move against it larger than that percent;
                         min_score makes it abstain when its best level is weak; carry_days keeps an unbroken zone
                         from the previous day when it abstains. The w_* weights score levels by touches, volume,
                         reaction volume, recency, confluence, role flips and distance.
 
                         Answer with only this JSON:
                         {"side": "support" | "resistance", "changes": {"<parameter>": <number>, ...}, "rationale": "..."}
-                        """,
+                        """),
         serviceLifetime: ServiceLifetime.Singleton)
     .WithAgent(
         agentName: "SkillCuratorAgent",

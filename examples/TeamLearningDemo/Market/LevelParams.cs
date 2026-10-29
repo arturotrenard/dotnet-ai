@@ -10,6 +10,7 @@
 // On the Change Date, this software will be available under
 // the Apache License, Version 2.0.
 
+using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -113,7 +114,9 @@ public sealed record LevelParams
                 "min_score" => p with { MinScore = x },
                 "trend_gate_pct" => p with { TrendGatePct = x },
                 "carry_days" => p with { CarryDays = (int)x },
-                _ => p,
+                // The catalogue check above admits only these keys: a key that gets here is in the catalogue
+                // but missing from this switch, a bug to fail on rather than an override to drop silently.
+                _ => throw new UnreachableException($"parameter '{key}' is in the catalogue but not applied"),
             };
         }
         return p;
@@ -123,13 +126,17 @@ public sealed record LevelParams
 /// <summary>A published skill version: <c>params.json</c> holds a version number and per-side overrides.</summary>
 public sealed record SkillParams(int Version, LevelParams Support, LevelParams Resistance, JsonObject Document)
 {
-    /// <summary>The parameters for <paramref name="side"/>; any other name than the two sides is an error.</summary>
-    public LevelParams For(string side) => side switch
+    /// <summary>The parameters for <paramref name="side"/>.</summary>
+    public LevelParams For(Side side) => side switch
     {
-        "support" => Support,
-        "resistance" => Resistance,
-        _ => throw UnknownSide(side),
+        Side.Support => Support,
+        Side.Resistance => Resistance,
+        _ => throw new ArgumentOutOfRangeException(nameof(side), side, null),
     };
+
+    /// <summary>The published version: the one owner of reading <c>skill/params.json</c>.</summary>
+    public static async Task<SkillParams> LoadAsync(string paramsFile, CancellationToken cancellationToken = default) =>
+        Parse(await File.ReadAllTextAsync(paramsFile, cancellationToken));
 
     public static SkillParams Parse(string json)
     {
@@ -142,24 +149,17 @@ public sealed record SkillParams(int Version, LevelParams Support, LevelParams R
     }
 
     /// <summary>A candidate version: the same document with one side's overrides changed.</summary>
-    public SkillParams WithChanges(string side, JsonObject changes)
+    public SkillParams WithChanges(Side side, JsonObject changes)
     {
-        if (!Levels.Sides.Contains(side))
-        {
-            throw UnknownSide(side);
-        }
         var doc = (JsonObject)Document.DeepClone();
-        var sideDoc = doc[side] as JsonObject ?? new JsonObject();
+        var sideDoc = doc[side.Name()] as JsonObject ?? new JsonObject();
         foreach (var (key, value) in changes)
         {
             sideDoc[key] = value?.DeepClone();
         }
-        doc[side] = sideDoc;
+        doc[side.Name()] = sideDoc;
         return Parse(doc.ToJsonString());
     }
-
-    private static ArgumentException UnknownSide(string? side) =>
-        new($"side must be \"support\" or \"resistance\", not \"{side}\"");
 
     public string ToJson() => Document.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
 }

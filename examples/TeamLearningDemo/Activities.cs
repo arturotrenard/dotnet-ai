@@ -29,18 +29,18 @@ public sealed class TeamPaths(string contentRoot)
 }
 
 /// <summary>Scores the published skill: readiness per side on test, failures by regime on train.</summary>
-public sealed class PrepareBaselineActivity(CandleStore store, TeamPaths paths) : WorkflowActivity<string, Baseline>
+public sealed class PrepareBaselineActivity(CandleStore store, TeamPaths paths) : WorkflowActivity<BaselineInput, Baseline>
 {
-    public override async Task<Baseline> RunAsync(WorkflowActivityContext context, string runId)
+    public override async Task<Baseline> RunAsync(WorkflowActivityContext context, BaselineInput input)
     {
-        var published = SkillParams.Parse(await File.ReadAllTextAsync(paths.ParamsFile));
-        var backtest = await Backtest.LoadAsync(store);
+        var published = await SkillParams.LoadAsync(paths.ParamsFile);
+        var backtest = await Backtest.LoadAsync(store, input.DataEnd);
         var verdict = new JsonObject();
         var report = new JsonObject();
         foreach (var side in Levels.Sides)
         {
-            verdict[side] = JsonSerializer.SerializeToNode(backtest.Verdict(side, published.For(side), baseline: null));
-            report[side] = JsonSerializer.SerializeToNode(backtest.RegimeReport(published.For(side), side));
+            verdict[side.Name()] = JsonSerializer.SerializeToNode(backtest.Verdict(side, published.For(side), baseline: null));
+            report[side.Name()] = JsonSerializer.SerializeToNode(backtest.RegimeReport(published.For(side), side));
         }
         return new Baseline(published.Version, verdict.ToJsonString(), report.ToJsonString());
     }
@@ -54,8 +54,8 @@ public sealed class EvaluateProposalActivity(CandleStore store, TeamPaths paths)
 {
     public override async Task<ProposalVerdict> RunAsync(WorkflowActivityContext context, ProposalInput input)
     {
-        var published = SkillParams.Parse(await File.ReadAllTextAsync(paths.ParamsFile));
-        return await ProposalJudge.JudgeAsync(published, input.Side, input.ChangesJson, () => Backtest.LoadAsync(store));
+        var published = await SkillParams.LoadAsync(paths.ParamsFile);
+        return await ProposalJudge.JudgeAsync(published, input.Side, input.ChangesJson, () => Backtest.LoadAsync(store, input.DataEnd));
     }
 }
 
@@ -67,12 +67,12 @@ public sealed class PublishActivity(TeamPaths paths) : WorkflowActivity<PublishI
 {
     public override async Task<int> RunAsync(WorkflowActivityContext context, PublishInput input)
     {
-        var published = SkillParams.Parse(await File.ReadAllTextAsync(paths.ParamsFile));
+        var published = await SkillParams.LoadAsync(paths.ParamsFile);
         if (published.Version != input.BaseVersion)
         {
             return published.Version;  // published already (a retry) or by another run: do not apply it twice
         }
-        var next = published.WithChanges(input.Side, JsonNode.Parse(input.ChangesJson)!.AsObject());
+        var next = published.WithChanges(SideNames.Parse(input.Side), JsonNode.Parse(input.ChangesJson)!.AsObject());
         var version = input.BaseVersion + 1;
         next.Document["version"] = version;
         next.Document["notes"] = $"v{version}: {input.Side} changes {input.ChangesJson}, promoted by learning run {input.RunId}.";
