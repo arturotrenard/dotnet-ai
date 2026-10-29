@@ -48,13 +48,11 @@ internal sealed partial class DaprConversationStore : IConversationStore
 {
     private const int MaxLoadAttempts = 3;
 
-    // Bytes a chunk document adds around its entries: {"entries":[...]}.
-    private const int ChunkEnvelopeBytes = 14;
-
     private readonly IConversationStateBackend _backend;
     private readonly DaprConversationStoreOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger _logger;
+    private readonly ConversationTtlRenewer _ttl;
 
     public DaprConversationStore(
         IConversationStateBackend backend,
@@ -70,6 +68,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
         _options = options;
         _timeProvider = timeProvider;
         _logger = (ILogger?)logger ?? NullLogger.Instance;
+        _ttl = new ConversationTtlRenewer(backend, options, timeProvider, _logger);
         Delay = (delay, ct) => Task.Delay(delay, _timeProvider, ct);
     }
 
@@ -77,8 +76,6 @@ internal sealed partial class DaprConversationStore : IConversationStore
     /// Waits between commit attempts. Replaced by tests, so retries do not wait.
     /// </summary>
     internal Func<TimeSpan, CancellationToken, Task> Delay { get; set; }
-
-    private int? ChunkTtlSeconds => _options.TimeToLiveSeconds * 2;
 
     /// <summary>The <c>ttlInSeconds</c> value that removes an expiry a key was written with.</summary>
     private const int PersistTtl = -1;
@@ -126,7 +123,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
 
             if (attempt == 1)
             {
-                await RenewTtlAsync(key, conversationId, live, etag, cancellationToken).ConfigureAwait(false);
+                await _ttl.RenewTtlAsync(key, conversationId, live, etag, cancellationToken).ConfigureAwait(false);
             }
 
             if (upTo == 0)
@@ -134,10 +131,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
                 return new ConversationSnapshot(0, [], live.Incarnation);
             }
 
-            // The latest summary inside the prefix stands for everything below what it covers. A prefix pinned
-            // before a summary was appended never includes it, so a run's history does not change mid-run.
-            var summary = live.Summaries?.Where(r => r.Sequence < upTo).MaxBy(r => r.Sequence);
-            if (summary is null && live.SummariesDroppedMax < upTo)
+            if (!ManifestRetention.TryFindSummary(live, upTo, out var summary))
             {
                 throw new ConversationNotFoundException(conversationId,
                     $"Conversation '{conversationId}' was compacted too many times since this history was first read; the summary it used is gone.");
@@ -161,11 +155,11 @@ internal sealed partial class DaprConversationStore : IConversationStore
                         $"Conversation '{conversationId}' is corrupt: entry {summary.Sequence} is not the summary its manifest lists.");
                 }
 
-                entries.Add(ToEntry(summaryEntry));
+                entries.Add(ConversationDocumentCodec.ToEntry(summaryEntry));
             }
 
             // Older summaries are superseded by the one above (or by the full history when there is none).
-            entries.AddRange(range.Where(e => e.SummaryOf is null).Select(ToEntry));
+            entries.AddRange(range.Where(e => e.SummaryOf is null).Select(ConversationDocumentCodec.ToEntry));
 
             return new ConversationSnapshot(upTo, entries, live.Incarnation);
         }
@@ -204,7 +198,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
                 continue;
             }
 
-            return range.Select(ToEntry).ToList();
+            return range.Select(ConversationDocumentCodec.ToEntry).ToList();
         }
 
         throw new ConversationStoreException(
@@ -229,7 +223,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
     {
         var keys = manifest.Chunks
             .Where(c => c.FirstSequence < to && c.FirstSequence + c.Count > from)
-            .Select(c => ChunkKey(key, c.Id))
+            .Select(c => ConversationKeys.ChunkKey(key, c.Id))
             .ToList();
         var documents = await _backend.GetBulkAsync(keys, cancellationToken).ConfigureAwait(false);
         if (keys.Any(k => !documents.ContainsKey(k)))
@@ -241,7 +235,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
         var range = new List<StoredConversationEntry>((int)Math.Min(to - from, int.MaxValue));
         foreach (var chunkKey in keys)
         {
-            foreach (var stored in ReadChunk(documents[chunkKey], chunkKey).Entries)
+            foreach (var stored in ConversationDocumentCodec.ReadChunk(documents[chunkKey], chunkKey).Entries)
             {
                 if (stored.Sequence >= from && stored.Sequence < to)
                 {
@@ -356,25 +350,16 @@ internal sealed partial class DaprConversationStore : IConversationStore
 
             var incarnation = manifest?.Incarnation ?? Guid.NewGuid().ToString("N");
             var baseMoved = next != turn.BaseSequence;
-            var entries = turn.Messages.Select((message, i) => new StoredConversationEntry
-            {
-                Sequence = next + i,
-                TurnId = turn.TurnId,
-                AgentName = turn.AgentName,
-                ChatClientKey = turn.ChatClientKey,
-                CreatedMs = now,
-                SummaryOf = summaryOf,
-                Message = StoredChatMessage.From(message),
-            }).ToList();
+            var entries = ConversationDocumentCodec.ToStoredEntries(turn, next, now, summaryOf);
 
             // Plan: keep the full chunks, and fold a small last chunk into this append's chunks.
             var kept = manifest?.Chunks.ToList() ?? [];
             string? superseded = null;
             var toWrite = entries;
-            if (kept.Count > 0 && kept[^1].Bytes < _options.MaxChunkBytes / 2)
+            if (ChunkPlanner.ShouldFoldTail(kept, _options.MaxChunkBytes))
             {
                 var tail = kept[^1];
-                var tailKey = ChunkKey(key, tail.Id);
+                var tailKey = ConversationKeys.ChunkKey(key, tail.Id);
                 var tailDocuments = await _backend.GetBulkAsync([tailKey], cancellationToken).ConfigureAwait(false);
                 if (!tailDocuments.TryGetValue(tailKey, out var tailDocument))
                 {
@@ -385,7 +370,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
 
                 superseded = tail.Id;
                 kept.RemoveAt(kept.Count - 1);
-                toWrite = [.. ReadChunk(tailDocument, tailKey).Entries, .. entries];
+                toWrite = [.. ConversationDocumentCodec.ReadChunk(tailDocument, tailKey).Entries, .. entries];
             }
 
             // TTLs: the manifest expires TimeToLive after the last append and chunks get twice that, so they
@@ -393,15 +378,15 @@ internal sealed partial class DaprConversationStore : IConversationStore
             // skew between writers), or when the configured TTL differs from the one they were written with.
             // Turning the TTL off removes the expiry once, with PersistTtl; otherwise no TTL is sent at all, so
             // stores without TTL support keep working.
-            var chunkTtl = ChunkTtlSeconds;
+            var chunkTtl = _ttl.ChunkTtlSeconds;
             var removeExpiry = chunkTtl is null && manifest?.ChunkTtlSeconds is not null;
             var chunkWriteTtl = chunkTtl ?? (removeExpiry ? PersistTtl : null);
             var manifestWriteTtl = _options.TimeToLiveSeconds ?? (removeExpiry ? PersistTtl : null);
             var chunksWrittenMs = kept.Count > 0 ? manifest!.ChunksWrittenMs : now;
-            var refresh = kept.Count > 0 && ChunksDueForRefresh(manifest!.ChunkTtlSeconds, chunksWrittenMs, now);
+            var refresh = kept.Count > 0 && _ttl.ChunksDueForRefresh(manifest!.ChunkTtlSeconds, chunksWrittenMs, now);
             if (refresh)
             {
-                if (!await RefreshChunksAsync(key, kept, chunkWriteTtl, cancellationToken).ConfigureAwait(false))
+                if (!await _ttl.RefreshChunksAsync(key, kept, chunkWriteTtl, cancellationToken).ConfigureAwait(false))
                 {
                     LogCommitConflict(turn.ConversationId, attempt);
                     continue;
@@ -410,7 +395,9 @@ internal sealed partial class DaprConversationStore : IConversationStore
                 chunksWrittenMs = now;
             }
 
-            var chunks = BuildChunks(toWrite);
+            var chunks = ChunkPlanner.Pack(toWrite, _options.MaxChunkBytes)
+                .Select(entriesOfChunk => ConversationDocumentCodec.CreateChunk(entriesOfChunk, Guid.NewGuid().ToString("N")))
+                .ToList();
             var commit = new PendingCommit(chunks.Select(c => c.Descriptor.Id).ToList(), etag, superseded);
             await WriteChunksAsync(key, chunks, chunkWriteTtl, cancellationToken).ConfigureAwait(false);
             pending.Add(commit);
@@ -419,14 +406,14 @@ internal sealed partial class DaprConversationStore : IConversationStore
             {
                 NextSequence = next + entries.Count,
                 Chunks = [.. kept, .. chunks.Select(c => c.Descriptor)],
-                Turns = TrimTurns(manifest?.Turns, new TurnRecord
+                Turns = ManifestRetention.TrimTurns(manifest?.Turns, new TurnRecord
                 {
                     Id = turn.TurnId,
                     FirstSequence = next,
                     Count = entries.Count,
                     BaseSequence = turn.BaseSequence,
                     BaseMoved = baseMoved,
-                }),
+                }, _options.TurnDedupeWindow),
                 ModifiedMs = Math.Max(now, (read?.ModifiedMs ?? 0) + 1),
                 ChunksWrittenMs = chunksWrittenMs,
                 ChunkTtlSeconds = chunkTtl,
@@ -436,10 +423,10 @@ internal sealed partial class DaprConversationStore : IConversationStore
             };
             if (summaryOf is { } covers)
             {
-                AddSummary(updated, new SummaryRecord { Sequence = next, CoversUpToSequence = covers });
+                ManifestRetention.AddSummary(updated, new SummaryRecord { Sequence = next, CoversUpToSequence = covers });
             }
 
-            var document = JsonSerializer.SerializeToElement(updated, ConversationStoreJsonContext.Default.ConversationManifest);
+            var document = ConversationDocumentCodec.Serialize(updated);
             bool? committed;
             try
             {
@@ -463,7 +450,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
                 await SettleAsync(key, pending, updated, _ => false, cancellationToken).ConfigureAwait(false);
                 if (superseded is not null)
                 {
-                    await TryDeleteAsync([ChunkKey(key, superseded)], cancellationToken).ConfigureAwait(false);
+                    await TryDeleteAsync([ConversationKeys.ChunkKey(key, superseded)], cancellationToken).ConfigureAwait(false);
                 }
 
                 return new ConversationAppendResult(ConversationAppendStatus.Appended,
@@ -504,7 +491,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
                     return false;
                 }
 
-                await TryDeleteAsync(tombstoned.Chunks.Select(c => ChunkKey(key, c.Id)).ToList(), cancellationToken)
+                await TryDeleteAsync(tombstoned.Chunks.Select(c => ConversationKeys.ChunkKey(key, c.Id)).ToList(), cancellationToken)
                     .ConfigureAwait(false);
                 return true;
             }
@@ -516,7 +503,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
                 Incarnation = manifest!.Incarnation,
                 ModifiedMs = Math.Max(_timeProvider.GetUtcNow().ToUnixTimeMilliseconds(), manifest.ModifiedMs + 1),
             };
-            var document = JsonSerializer.SerializeToElement(tombstone, ConversationStoreJsonContext.Default.ConversationManifest);
+            var document = ConversationDocumentCodec.Serialize(tombstone);
             tombstoned = manifest;
             bool committed;
             try
@@ -533,7 +520,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
             if (committed)
             {
                 // No commit can reference these chunks any more: every one is conditioned on an older ETag.
-                await TryDeleteAsync(manifest.Chunks.Select(c => ChunkKey(key, c.Id)).ToList(), cancellationToken)
+                await TryDeleteAsync(manifest.Chunks.Select(c => ConversationKeys.ChunkKey(key, c.Id)).ToList(), cancellationToken)
                     .ConfigureAwait(false);
                 return true;
             }
@@ -543,149 +530,14 @@ internal sealed partial class DaprConversationStore : IConversationStore
             $"Could not delete conversation '{conversationId}' after {_options.MaxCommitAttempts} attempts.", lastError);
     }
 
-    internal string ManifestKey(string conversationId)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);
-        if (conversationId.Length > DaprConversationStoreOptions.MaxConversationIdLength)
-        {
-            throw new ArgumentException(
-                $"A conversation id can have at most {DaprConversationStoreOptions.MaxConversationIdLength} characters.",
-                nameof(conversationId));
-        }
-
-        return _options.KeyPrefix + EscapeKey(conversationId);
-    }
-
-    /// <summary>
-    /// Percent-escapes the characters with a meaning in keys: <c>|</c> (Dapr separates the component's key
-    /// prefix with <c>||</c>), <c>#</c> (separates a chunk id) and <c>%</c> itself, so that two conversation
-    /// ids never share a key and an id never reaches another conversation's chunks.
-    /// </summary>
-    private static string EscapeKey(string conversationId)
-    {
-        if (conversationId.AsSpan().IndexOfAny("%|#") < 0)
-        {
-            return conversationId;
-        }
-
-        return conversationId
-            .Replace("%", "%25", StringComparison.Ordinal)
-            .Replace("|", "%7C", StringComparison.Ordinal)
-            .Replace("#", "%23", StringComparison.Ordinal);
-    }
+    internal string ManifestKey(string conversationId) =>
+        ConversationKeys.ManifestKey(_options.KeyPrefix, conversationId);
 
     private static bool IsLive(ConversationManifest? manifest) => manifest is { Deleted: false };
 
-    internal static string ChunkKey(string manifestKey, string chunkId) => $"{manifestKey}#{chunkId}";
-
-    private async Task<(ConversationManifest? Manifest, string? ETag)> ReadManifestAsync(
-        string key, CancellationToken cancellationToken)
-    {
-        var (value, etag) = await _backend.GetAsync(key, cancellationToken).ConfigureAwait(false);
-        if (value is null)
-        {
-            return (null, null);
-        }
-
-        ConversationManifest? manifest;
-        try
-        {
-            manifest = value.Value.Deserialize(ConversationStoreJsonContext.Default.ConversationManifest);
-        }
-        catch (JsonException ex)
-        {
-            throw new ConversationStoreException($"The conversation manifest at '{key}' is not valid.", ex);
-        }
-
-        if (manifest is null)
-        {
-            throw new ConversationStoreException($"The conversation manifest at '{key}' is not valid.");
-        }
-
-        if (manifest.Version > ConversationManifest.CurrentVersion)
-        {
-            throw new ConversationStoreException(
-                $"The conversation at '{key}' was written by a newer version of the store (format {manifest.Version}).");
-        }
-
-        if (string.IsNullOrEmpty(etag))
-        {
-            throw new ConversationStoreException(
-                $"State store '{_options.StateStoreName}' returned no ETag for '{key}'. The conversation store needs a state store that supports ETags.");
-        }
-
-        return (manifest, etag);
-    }
-
-    private static ConversationChunk ReadChunk(JsonElement document, string key)
-    {
-        try
-        {
-            return document.Deserialize(ConversationStoreJsonContext.Default.ConversationChunk)
-                ?? throw new ConversationStoreException($"The conversation chunk at '{key}' is not valid.");
-        }
-        catch (JsonException ex)
-        {
-            throw new ConversationStoreException($"The conversation chunk at '{key}' is not valid.", ex);
-        }
-    }
-
-    private static ConversationEntry ToEntry(StoredConversationEntry stored) => new(
-        stored.Sequence,
-        stored.TurnId,
-        stored.AgentName,
-        stored.ChatClientKey,
-        DateTimeOffset.FromUnixTimeMilliseconds(stored.CreatedMs),
-        stored.Message.ToWorkflowChatMessage(),
-        stored.SummaryOf);
-
-    /// <summary>
-    /// Splits entries into chunks greedily by serialized size. An entry larger than the limit gets a chunk of its own.
-    /// </summary>
-    private List<(ChunkDescriptor Descriptor, JsonElement Document)> BuildChunks(List<StoredConversationEntry> entries)
-    {
-        var chunks = new List<(ChunkDescriptor, JsonElement)>();
-        var current = new List<StoredConversationEntry>();
-        var currentBytes = ChunkEnvelopeBytes;
-
-        foreach (var entry in entries)
-        {
-            var entryBytes = JsonSerializer.SerializeToUtf8Bytes(entry, ConversationStoreJsonContext.Default.StoredConversationEntry).Length;
-            var separator = current.Count > 0 ? 1 : 0;
-            if (current.Count > 0 && currentBytes + separator + entryBytes > _options.MaxChunkBytes)
-            {
-                chunks.Add(CreateChunk(current));
-                current = [];
-                currentBytes = ChunkEnvelopeBytes;
-                separator = 0;
-            }
-
-            current.Add(entry);
-            currentBytes += separator + entryBytes;
-        }
-
-        if (current.Count > 0)
-        {
-            chunks.Add(CreateChunk(current));
-        }
-
-        return chunks;
-    }
-
-    private static (ChunkDescriptor, JsonElement) CreateChunk(List<StoredConversationEntry> entries)
-    {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(new ConversationChunk { Entries = entries },
-            ConversationStoreJsonContext.Default.ConversationChunk);
-        using var parsed = JsonDocument.Parse(bytes);
-        var descriptor = new ChunkDescriptor
-        {
-            Id = Guid.NewGuid().ToString("N"),
-            FirstSequence = entries[0].Sequence,
-            Count = entries.Count,
-            Bytes = bytes.Length,
-        };
-        return (descriptor, parsed.RootElement.Clone());
-    }
+    private Task<(ConversationManifest? Manifest, string? ETag)> ReadManifestAsync(
+        string key, CancellationToken cancellationToken) =>
+        _backend.ReadManifestAsync(key, _options.StateStoreName, cancellationToken);
 
     private async Task WriteChunksAsync(
         string key,
@@ -698,7 +550,7 @@ internal sealed partial class DaprConversationStore : IConversationStore
         {
             foreach (var (descriptor, document) in chunks)
             {
-                var chunkKey = ChunkKey(key, descriptor.Id);
+                var chunkKey = ConversationKeys.ChunkKey(key, descriptor.Id);
                 written.Add(chunkKey);
                 await _backend.SaveAsync(chunkKey, document, ttlSeconds, cancellationToken).ConfigureAwait(false);
             }
@@ -709,188 +561,6 @@ internal sealed partial class DaprConversationStore : IConversationStore
             await TryDeleteAsync(written, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
-    }
-
-    /// <summary>
-    /// Renews a conversation's TTL when it is read between half the TTL and a margin before it expires, so a run that
-    /// keeps reading its history at least that often does not lose it. A single pause longer than the TTL (between two
-    /// reads, or after the last one) still does: size <see cref="DaprConversationStoreOptions.TimeToLive"/> for the
-    /// longest pause. The chunks are rewritten first when half their own margin is used (so they keep outliving the
-    /// manifest), then the manifest is written again unchanged, conditioned on the ETag just read.
-    /// </summary>
-    /// <remarks>
-    /// No renewal is tried in the last stretch before expiry (<see cref="RenewalMargin"/>), and the clock is checked
-    /// again before the manifest is written: Redis accepts a save conditioned on any ETag once the key is gone, so a
-    /// renewal that reached an expired manifest would bring the conversation back. If the manifest write loses a
-    /// race or fails after chunks were rewritten, the chunks the current manifest no longer references (deleted by a
-    /// concurrent delete or fold while they were being rewritten) are deleted again. Best effort throughout: a
-    /// failure is logged and leaves the load as it was.
-    /// </remarks>
-    private async Task RenewTtlAsync(
-        string key, string conversationId, ConversationManifest live, string? etag, CancellationToken cancellationToken)
-    {
-        if (_options.TimeToLive is not { } ttl || etag is null)
-        {
-            return;
-        }
-
-        var ttlMs = (long)ttl.TotalMilliseconds;
-        var lastWritten = live.ModifiedMs;
-        var now = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
-        if (now - lastWritten < ttlMs / 2 || !SafeToRenew(now))
-        {
-            return;
-        }
-
-        var refreshed = false;
-        var renewed = false;
-        try
-        {
-            if (live.Chunks.Count > 0 && ChunksDueForRefresh(live.ChunkTtlSeconds, live.ChunksWrittenMs, now))
-            {
-                if (!await RefreshChunksAsync(key, live.Chunks, ChunkTtlSeconds, cancellationToken).ConfigureAwait(false))
-                {
-                    // A concurrent append replaced a chunk, so it moved the manifest and renewed the TTL itself.
-                    return;
-                }
-
-                refreshed = true;
-            }
-
-            // The chunk writes took time: write the manifest only if it still cannot have expired.
-            now = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
-            if (!SafeToRenew(now))
-            {
-                return;
-            }
-
-            var renewal = JsonSerializer.Deserialize(
-                JsonSerializer.SerializeToElement(live, ConversationStoreJsonContext.Default.ConversationManifest),
-                ConversationStoreJsonContext.Default.ConversationManifest)!;
-            if (refreshed)
-            {
-                renewal.ChunksWrittenMs = now;
-                renewal.ChunkTtlSeconds = ChunkTtlSeconds;
-            }
-
-            renewal.ModifiedMs = Math.Max(now, lastWritten + 1);
-            var document = JsonSerializer.SerializeToElement(renewal, ConversationStoreJsonContext.Default.ConversationManifest);
-            renewed = await _backend.TrySaveAsync(key, document, etag, _options.TimeToLiveSeconds, cancellationToken).ConfigureAwait(false);
-            if (renewed)
-            {
-                LogTtlRenewed(conversationId);
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            LogTtlRenewFailed(ex, conversationId);
-        }
-        finally
-        {
-            if (refreshed && !renewed)
-            {
-                await DeleteResurrectedChunksAsync(key, live.Chunks, conversationId).ConfigureAwait(false);
-            }
-        }
-
-        bool SafeToRenew(long at) => at - lastWritten < ttlMs - RenewalMargin(ttlMs);
-    }
-
-    /// <summary>
-    /// Whether chunks written with <paramref name="writtenWithTtl"/> at <paramref name="writtenMs"/> must be written
-    /// again so they keep outliving the manifest: the configured TTL changed, or half their margin is used. The one
-    /// rule appends and reads share.
-    /// </summary>
-    private bool ChunksDueForRefresh(int? writtenWithTtl, long writtenMs, long now) =>
-        writtenWithTtl != ChunkTtlSeconds
-        || (_options.TimeToLive is { } ttl && now - writtenMs >= (long)ttl.TotalMilliseconds / 2);
-
-    /// <summary>
-    /// The last stretch before a manifest expires in which it is not renewed on read: a quarter of the TTL. It scales
-    /// with the TTL, so a renewal window (from half the TTL to three quarters) always exists.
-    /// </summary>
-    private static long RenewalMargin(long ttlMs) => ttlMs / 4;
-
-    /// <summary>
-    /// After a renewal rewrote chunks but did not commit its manifest: deletes those the current manifest does not
-    /// reference. A concurrent delete or fold had deleted them, and the rewrite brought them back. Nothing is deleted
-    /// when the manifest is absent, because a pending commit could still land on the missing key.
-    /// </summary>
-    private async Task DeleteResurrectedChunksAsync(string key, List<ChunkDescriptor> rewritten, string conversationId)
-    {
-        try
-        {
-            var (current, _) = await ReadManifestAsync(key, CancellationToken.None).ConfigureAwait(false);
-            if (current is null)
-            {
-                return;
-            }
-
-            var referenced = current.Chunks.Select(c => c.Id).ToHashSet(StringComparer.Ordinal);
-            await TryDeleteAsync(rewritten.Where(c => !referenced.Contains(c.Id)).Select(c => ChunkKey(key, c.Id)).ToList(),
-                CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            LogTtlRenewFailed(ex, conversationId);
-        }
-    }
-
-    /// <summary>
-    /// Rewrites the kept chunks unchanged with a fresh TTL, so they outlive the manifest. Returns false when one
-    /// of them is gone, which means a concurrent append has moved the manifest.
-    /// </summary>
-    private async Task<bool> RefreshChunksAsync(
-        string key, List<ChunkDescriptor> kept, int? ttlSeconds, CancellationToken cancellationToken)
-    {
-        var keys = kept.Select(c => ChunkKey(key, c.Id)).ToList();
-        var documents = await _backend.GetBulkAsync(keys, cancellationToken).ConfigureAwait(false);
-        if (keys.Any(k => !documents.ContainsKey(k)))
-        {
-            return false;
-        }
-
-        foreach (var chunkKey in keys)
-        {
-            await _backend.SaveAsync(chunkKey, documents[chunkKey], ttlSeconds, cancellationToken).ConfigureAwait(false);
-        }
-
-        return true;
-    }
-
-    /// <summary>
-    /// Records a summary, keeping the most recent ones. A load pinned to a prefix whose summary was dropped fails
-    /// (see <see cref="ConversationManifest.SummariesDroppedMax"/>); every other load still finds its summary.
-    /// </summary>
-    private static void AddSummary(ConversationManifest manifest, SummaryRecord added)
-    {
-        var all = new List<SummaryRecord>((manifest.Summaries?.Count ?? 0) + 1);
-        if (manifest.Summaries is not null)
-        {
-            all.AddRange(manifest.Summaries);
-        }
-
-        all.Add(added);
-        if (all.Count > ConversationManifest.MaxSummaries)
-        {
-            var dropped = all.Count - ConversationManifest.MaxSummaries;
-            manifest.SummariesDroppedMax = all.Take(dropped).Max(r => r.Sequence);
-            all = all.GetRange(dropped, ConversationManifest.MaxSummaries);
-        }
-
-        manifest.Summaries = all;
-    }
-
-    private List<TurnRecord> TrimTurns(List<TurnRecord>? turns, TurnRecord added)
-    {
-        var all = new List<TurnRecord>((turns?.Count ?? 0) + 1);
-        if (turns is not null)
-        {
-            all.AddRange(turns);
-        }
-
-        all.Add(added);
-        return all.Count > _options.TurnDedupeWindow ? all.GetRange(all.Count - _options.TurnDedupeWindow, _options.TurnDedupeWindow) : all;
     }
 
     /// <summary>
@@ -939,27 +609,12 @@ internal sealed partial class DaprConversationStore : IConversationStore
             }
         }
 
-        await TryDeleteAsync(toDelete.Select(id => ChunkKey(manifestKey, id)).ToList(), cancellationToken)
+        await TryDeleteAsync(toDelete.Select(id => ConversationKeys.ChunkKey(manifestKey, id)).ToList(), cancellationToken)
             .ConfigureAwait(false);
     }
 
-    private async Task TryDeleteAsync(List<string> keys, CancellationToken cancellationToken)
-    {
-        if (keys.Count == 0)
-        {
-            return;
-        }
-
-        try
-        {
-            await _backend.DeleteBulkAsync(keys, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            // Unreferenced chunks are harmless; the TTL removes them when one is set.
-            LogDeleteFailed(ex, keys.Count);
-        }
-    }
+    private Task TryDeleteAsync(List<string> keys, CancellationToken cancellationToken) =>
+        _backend.TryDeleteAsync(keys, _logger, cancellationToken);
 
     private static TimeSpan Backoff(int failedAttempts)
     {
@@ -981,13 +636,4 @@ internal sealed partial class DaprConversationStore : IConversationStore
 
     [LoggerMessage(LogLevel.Debug, "A chunk of conversation '{ConversationId}' was replaced while loading it (attempt {Attempt}); reading it again.")]
     private partial void LogChunkMissingOnLoad(string conversationId, int attempt);
-
-    [LoggerMessage(LogLevel.Debug, "Conversation '{ConversationId}' was read after half its TTL; its expiry was renewed.")]
-    private partial void LogTtlRenewed(string conversationId);
-
-    [LoggerMessage(LogLevel.Warning, "Could not renew the TTL of conversation '{ConversationId}' while reading it; the next read or append tries again.")]
-    private partial void LogTtlRenewFailed(Exception exception, string conversationId);
-
-    [LoggerMessage(LogLevel.Warning, "Could not delete {Count} unreferenced conversation chunk(s); they are left for the state store TTL.")]
-    private partial void LogDeleteFailed(Exception exception, int count);
 }
