@@ -382,9 +382,10 @@ public static class DaprAgentsBuilderExtensions
     /// <remarks>
     /// The budget is <paramref name="maxContextTokens"/> - <paramref name="maxOutputTokens"/>. A turn starts at a user
     /// message, so the history sent never opens with an assistant message or a tool result, and a tool call always
-    /// travels with its results. The instructions, the context providers' messages and the run's own messages are
-    /// always sent; when they alone exceed the budget, the LLM call fails with
-    /// <see cref="Runtime.ContextWindowExceededException"/>. Tokens are estimated as characters / 4.
+    /// travels with its results. The instructions, the context providers' messages, system messages in the history
+    /// other than a stored summary, and the run's own messages are always sent; when they alone exceed the budget,
+    /// the LLM call fails, and with it the run, with an error saying the context window was exceeded. Tokens are
+    /// estimated as characters / 4 over the messages as they are sent.
     /// </remarks>
     public static IAgentsBuilder WithContextWindow(this IAgentsBuilder builder, int maxContextTokens, int maxOutputTokens)
     {

@@ -32,7 +32,7 @@ public sealed class ConversationCompactionOptions
     /// Compaction runs after a run whose loaded history is estimated at more than this many tokens. Required.
     /// </summary>
     /// <remarks>
-    /// Tokens are estimated as characters / 4 over the stored history; the context window estimates bytes / 4 over
+    /// Tokens are estimated as characters / 4 over the stored history; the context window estimates characters / 4 over
     /// the whole prompt, so leave a margin between the two.
     /// </remarks>
     public int TriggerTokens { get; set; }

@@ -258,6 +258,12 @@ public sealed class AgentRunWorkflow : Workflow<DaprAgentInvocation, AgentRunRes
     /// conversation. A failed run never gets here, so it stores nothing; once it is here, nothing after the commit
     /// fails the run (see <see cref="NotifyAfterCommitAsync"/>).
     /// </summary>
+    /// <remarks>
+    /// Cases where a run can still fail with its turn stored, so a caller that retries it as a new run stores the turn
+    /// twice: the run is terminated, or its result is too large to return, right after the commit; or the commit lands
+    /// but its reply is lost and every retry fails (the store is unreachable for longer than the retries last). All three
+    /// need a turn id that stays the same across the caller's retries, which a new run cannot have today.
+    /// </remarks>
     private static async Task<ConversationAppendResult?> CommitTurnAsync(
         WorkflowContext context,
         DaprAgentInvocation input,

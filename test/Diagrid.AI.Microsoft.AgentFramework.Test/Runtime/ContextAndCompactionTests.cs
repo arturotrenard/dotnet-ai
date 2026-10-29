@@ -152,16 +152,93 @@ public sealed class ContextAndCompactionTests
     [Fact]
     public void SplitTurns_StartsATurnAtEachUserMessage_AndKeepsALeadingSummaryApart()
     {
-        List<WorkflowChatMessage> history =
+        List<ChatMessage> messages =
         [
-            new() { Role = "system", Content = "summary" },
-            new() { Role = "user", Content = "a" },
-            new() { Role = "assistant", Content = "b" },
-            new() { Role = "tool" },
-            new() { Role = "user", Content = "c" },
+            new(ChatRole.System, "instructions"),
+            new(ChatRole.System, "summary"),
+            new(ChatRole.User, "a"),
+            new(ChatRole.Assistant, "b"),
+            new(ChatRole.Tool, "r"),
+            new(ChatRole.User, "c"),
+            new(ChatRole.User, "the run"),
         ];
 
-        Assert.Equal([1, 3, 1], CallLlmActivity.SplitTurns(history).Select(t => t.Count));
+        Assert.Equal([[1], [2, 3, 4], [5]], CallLlmActivity.SplitTurns(messages, 1, 6));
+    }
+
+    [Fact]
+    public async Task ContextWindow_ASystemContextMessage_IsCountedOnce()
+    {
+        // Budget 300; an 800-character system context message is about 200 tokens, so the call fits.
+        var (activity, client) = BuildActivity(contextWindows: [new ContextWindowRegistration(null, 400, 100)]);
+        client.SetNextResponse(finalText: "ok");
+
+        await activity.RunAsync(new TestWorkflowActivityContext("i"),
+            new CallLlmInput(AgentName, null, [new WorkflowChatMessage { Role = "user", Content = "latest" }])
+            {
+                AdditionalMessages = [new WorkflowChatMessage { Role = "system", Content = new string('m', 800) }],
+            });
+
+        Assert.Equal("latest", client.LastMessages![^1].Text);
+    }
+
+    [Fact]
+    public async Task ContextWindow_KeepsACallersSystemMessageInTheHistory()
+    {
+        var (activity, client) = BuildActivity(contextWindows: [new ContextWindowRegistration(null, 400, 100)]);
+        client.SetNextResponse(finalText: "ok");
+        List<WorkflowChatMessage> history =
+        [
+            new() { Role = "system", Content = "PERSONA: answer in French" },
+            .. Enumerable.Range(0, 10).Select(i => new WorkflowChatMessage { Role = i % 2 == 0 ? "user" : "assistant", Content = $"old {i} " + new string('h', 200) }),
+        ];
+
+        await activity.RunAsync(new TestWorkflowActivityContext("i"),
+            new CallLlmInput(AgentName, null, [.. history, new WorkflowChatMessage { Role = "user", Content = "latest" }]) { RunMessagesStart = history.Count });
+
+        var sent = client.LastMessages!;
+        Assert.Contains(sent, m => m.Text == "PERSONA: answer in French");
+        Assert.True(sent.Count < history.Count + 2, $"sent {sent.Count} messages");
+    }
+
+    [Fact]
+    public async Task ContextWindow_ReasoningThatIsNotSent_DoesNotCount()
+    {
+        // Another agent's reasoning sits in the history; this agent never sends it, so it must not push turns out.
+        var (activity, client) = BuildActivity(contextWindows: [new ContextWindowRegistration(null, 400, 100)]);
+        client.SetNextResponse(finalText: "ok");
+        List<WorkflowChatMessage> history =
+        [
+            new() { Role = "user", Content = "question" },
+            new()
+            {
+                Role = "assistant",
+                Content = "answer",
+                Reasoning = [new WorkflowReasoningContent { Text = new string('x', 4000), ProtectedData = new string('p', 4000), Source = "another-agent" }],
+            },
+        ];
+
+        await activity.RunAsync(new TestWorkflowActivityContext("i"),
+            new CallLlmInput(AgentName, null, [.. history, new WorkflowChatMessage { Role = "user", Content = "latest" }]) { RunMessagesStart = history.Count });
+
+        Assert.Equal(["be brief", "question", "answer", "latest"], client.LastMessages!.Select(m => m.Text));
+    }
+
+    [Fact]
+    public async Task ContextWindow_AStoredSummaryCanBeLeftOut_LikeAnyTurn()
+    {
+        var store = await NewStoreWithTurns(1, padding: 600);
+        var inc = (await store.LoadAsync(ConversationId)).Incarnation;
+        await store.AppendSummaryAsync(new ConversationSummary(ConversationId, "s1", 2, AgentName, null,
+            new WorkflowChatMessage { Role = "system", Content = "SUMMARY " + new string('s', 1200) }, inc));
+        await AppendTurn(store, "t1", "recent question", "recent answer");
+        var (activity, client) = BuildActivity(store: store, contextWindows: [new ContextWindowRegistration(null, 300, 100)]);
+        client.SetNextResponse(finalText: "ok");
+
+        await activity.RunAsync(new TestWorkflowActivityContext("i"),
+            new CallLlmInput(AgentName, null, [new WorkflowChatMessage { Role = "user", Content = "latest" }]) { ConversationId = ConversationId });
+
+        Assert.Equal(["be brief", "recent question", "recent answer", "latest"], client.LastMessages!.Select(m => m.Text));
     }
 
     [Fact]

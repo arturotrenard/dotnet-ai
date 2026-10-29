@@ -16,7 +16,10 @@ namespace Diagrid.AI.Microsoft.AgentFramework.Runtime;
 /// An LLM call does not fit the agent's context window (<c>WithContextWindow</c>) even with every earlier turn left
 /// out: its instructions, the context providers' messages and the run's own messages are already too large.
 /// </summary>
-public sealed class ContextWindowExceededException : InvalidOperationException
+/// <remarks>
+/// Internal: it fails the LLM activity, so callers see the run fail with its message, not this type.
+/// </remarks>
+internal sealed class ContextWindowExceededException : InvalidOperationException
 {
     /// <summary>
     /// Creates the exception.

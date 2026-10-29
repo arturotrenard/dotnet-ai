@@ -94,7 +94,8 @@ internal sealed partial class CallLlmActivity(
             var replay = ReasoningReplayRegistration.Resolve(reasoningReplays ?? [], input.AgentName);
             var messages = BuildChatMessages(config.Instructions, input.AdditionalInstructions, input.AdditionalMessages,
                 runMessages, reasoningSource, replay, runMessagesStart);
-            messages = FitContextWindow(input.AgentName, messages, runMessages, runMessagesStart, input.AdditionalMessages);
+            messages = FitContextWindow(input.AgentName, messages, runMessages.Count,
+                Math.Min(runMessagesStart, runMessages.Count), history is { Entries: [{ SummaryOf: not null }, ..] });
             var additionalTools = ResolveAdditionalTools(input.AgentName, input.AdditionalToolNames);
             var reasoning = ReasoningEffortRegistration.Resolve(reasoningEfforts ?? [], input.AgentName, config.BaseOptions?.Reasoning);
             WarnIfEffortIgnored(input.AgentName, config.ChatClient, reasoning);
@@ -121,7 +122,8 @@ internal sealed partial class CallLlmActivity(
                 $"The LLM call for agent '{input.AgentName}' did not complete within {timeout}. " +
                 "Raise it with WithLlmTimeout(...) on the agents builder.", ex);
         }
-        catch (Exception ex)
+        // Already logged where it is thrown.
+        catch (Exception ex) when (ex is not ContextWindowExceededException)
         {
             LogLlmCallError(input.AgentName, ex.Message);
             throw;
@@ -153,33 +155,34 @@ internal sealed partial class CallLlmActivity(
     /// Only earlier turns are dropped, whole and oldest first, until what is sent fits the window less the room kept
     /// for the reply. A turn starts at a user message, so the history sent never opens with an assistant message or a
     /// tool result, and a tool call is never separated from its results; a stored summary is a turn of its own. The
-    /// instructions, the context providers' messages and the run's own messages are always sent: dropping them would
-    /// lose the task, the context the run was given, or the reasoning a tool loop needs. When those alone do not fit,
-    /// the call fails with a <see cref="ContextWindowExceededException"/> instead of reaching the model, which would
-    /// reject the request or silently cut it.
+    /// instructions, the context providers' messages, system messages in the history other than a stored summary (a
+    /// persona the caller passed in, for instance) and the run's own messages are always sent. When those alone do not
+    /// fit, the call fails instead of reaching the model, which would reject the request or silently cut it. Tokens
+    /// are estimated as characters / 4 over the messages as they are sent, so reasoning that is not sent back does not
+    /// count.
     /// </remarks>
     private List<ChatMessage> FitContextWindow(
         string agentName,
         List<ChatMessage> messages,
-        List<WorkflowChatMessage> runMessages,
-        int runMessagesStart,
-        List<WorkflowChatMessage>? additionalMessages)
+        int runMessageCount,
+        int historyCount,
+        bool historyStartsWithSummary)
     {
         if (ContextWindowRegistration.Resolve(contextWindows ?? [], agentName) is not { } window)
         {
             return messages;
         }
 
-        // BuildChatMessages appends one chat message per run message, last, after the system message and the
-        // context providers' messages.
-        var historyCount = Math.Min(runMessagesStart, runMessages.Count);
-        var head = messages.Count - runMessages.Count;
-        var history = runMessages.Take(historyCount).ToList();
+        // BuildChatMessages puts the system message and the context providers' messages first (the head), then one
+        // chat message per run message: the earlier turns, then the run's own messages.
+        var head = messages.Count - runMessageCount;
+        var historyEnd = head + historyCount;
+        bool AlwaysSent(int i) =>
+            i < head || i >= historyEnd
+            || (messages[i].Role == ChatRole.System && !(historyStartsWithSummary && i == head));
 
         var budget = (long)window.MaxContextTokens - window.MaxOutputTokens;
-        var fixedTokens = TokenEstimate.Of(messages.Take(head).Where(m => m.Role == ChatRole.System).Select(m => m.Text))
-            + TokenEstimate.Of(additionalMessages ?? [])
-            + TokenEstimate.Of(runMessages.Skip(historyCount));
+        var fixedTokens = TokenEstimate.Of(Enumerable.Range(0, messages.Count).Where(AlwaysSent).Select(i => messages[i]));
         if (fixedTokens > budget)
         {
             LogContextWindowExceeded(agentName, fixedTokens, window.MaxContextTokens, window.MaxOutputTokens);
@@ -190,41 +193,40 @@ internal sealed partial class CallLlmActivity(
                 "it with WithContextWindow(...) if the model allows more, or shorten what the run's tools return.");
         }
 
-        var turns = SplitTurns(history);
-        var historyTokens = turns.Sum(t => t.Tokens);
-        var dropped = 0;
-        var droppedMessages = 0;
-        while (fixedTokens + historyTokens > budget)
+        var turns = SplitTurns(messages, head, historyEnd);
+        var droppable = turns.Select(t => t.Where(i => !AlwaysSent(i)).ToList()).ToList();
+        var historyTokens = droppable.Sum(t => TokenEstimate.Of(t.Select(i => messages[i])));
+        var drop = new HashSet<int>();
+        for (var t = 0; t < turns.Count && fixedTokens + historyTokens > budget; t++)
         {
-            historyTokens -= turns[dropped].Tokens;
-            droppedMessages += turns[dropped].Count;
-            dropped++;
+            historyTokens -= TokenEstimate.Of(droppable[t].Select(i => messages[i]));
+            drop.UnionWith(droppable[t]);
         }
 
-        if (droppedMessages == 0)
+        if (drop.Count == 0)
         {
             return messages;
         }
 
-        LogContextWindowApplied(agentName, messages.Count, messages.Count - droppedMessages);
-        return [.. messages.Take(head), .. messages.Skip(head + droppedMessages)];
+        LogContextWindowApplied(agentName, messages.Count, messages.Count - drop.Count);
+        return [.. messages.Where((_, i) => !drop.Contains(i))];
     }
 
     /// <summary>
-    /// Splits earlier messages into turns, each starting at a user message, with its estimated tokens. Messages
-    /// before the first user message (a stored summary) form a turn of their own.
+    /// Splits the earlier messages, <paramref name="messages"/>[start..end), into turns of message indexes, each
+    /// starting at a user message. Messages before the first user message (a stored summary) form a turn of their own.
     /// </summary>
-    internal static List<(int Count, long Tokens)> SplitTurns(List<WorkflowChatMessage> history)
+    internal static List<List<int>> SplitTurns(List<ChatMessage> messages, int start, int end)
     {
-        var turns = new List<(int Count, long Tokens)>();
-        var start = 0;
-        for (var i = 1; i <= history.Count; i++)
+        var turns = new List<List<int>>();
+        for (var i = start; i < end; i++)
         {
-            if (i == history.Count || string.Equals(history[i].Role, "user", StringComparison.OrdinalIgnoreCase))
+            if (turns.Count == 0 || messages[i].Role == ChatRole.User)
             {
-                turns.Add((i - start, TokenEstimate.Of(history.Skip(start).Take(i - start))));
-                start = i;
+                turns.Add([]);
             }
+
+            turns[^1].Add(i);
         }
 
         return turns;

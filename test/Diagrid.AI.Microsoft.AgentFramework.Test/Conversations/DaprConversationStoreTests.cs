@@ -402,6 +402,67 @@ public sealed class DaprConversationStoreTests
     }
 
     [Fact]
+    public async Task Ttl_ALoadCloseToExpiry_DoesNotRenew()
+    {
+        // Within the last quarter of the TTL a renewal could reach an expired key, which Redis would accept.
+        var store = CreateStore(o => o.TimeToLive = TimeSpan.FromSeconds(100));
+        await store.AppendTurnAsync(Turn("t1", 0, User("hi")), TestContext.Current.CancellationToken);
+        _backend.Log.Clear();
+
+        _clock.Now = Start.AddSeconds(80);
+        await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain(_backend.Log, l => l.StartsWith("save:", StringComparison.Ordinal) || l.StartsWith("trysave", StringComparison.Ordinal));
+        Assert.Equal(Start.ToUnixTimeMilliseconds(), Manifest().ModifiedMs);
+    }
+
+    [Fact]
+    public async Task Ttl_ARenewalWhoseChunkWritesRanIntoTheMargin_DoesNotWriteTheManifest()
+    {
+        var store = CreateStore(o => o.TimeToLive = TimeSpan.FromSeconds(100));
+        await store.AppendTurnAsync(Turn("t1", 0, User("hi")), TestContext.Current.CancellationToken);
+        _backend.Log.Clear();
+        _clock.Now = Start.AddSeconds(60);
+
+        // The chunk rewrite is slow: by the time it is done, the manifest is in its last quarter.
+        _backend.FailSave = _ =>
+        {
+            _clock.Now = Start.AddSeconds(90);
+            return false;
+        };
+        await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.DoesNotContain(_backend.Log, l => l.StartsWith("trysave", StringComparison.Ordinal));
+        Assert.Equal(Start.ToUnixTimeMilliseconds(), Manifest().ModifiedMs);
+    }
+
+    [Fact]
+    public async Task Ttl_ARenewalRacingADelete_DoesNotLeaveDeletedChunksBehind()
+    {
+        var store = CreateStore(o => o.TimeToLive = TimeSpan.FromSeconds(100));
+        await store.AppendTurnAsync(Turn("t1", 0, User("secret")), TestContext.Current.CancellationToken);
+        _clock.Now = Start.AddSeconds(60);
+
+        // The delete lands after the renewal read the chunks and before it writes them back.
+        var deleted = false;
+        _backend.FailSave = _ =>
+        {
+            if (!deleted)
+            {
+                deleted = true;
+                Assert.True(store.DeleteAsync(ConversationId).GetAwaiter().GetResult());
+            }
+
+            return false;
+        };
+        await store.LoadAsync(ConversationId, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(deleted);
+        Assert.Empty(ChunkKeys());
+        Assert.True(Manifest().Deleted);
+    }
+
+    [Fact]
     public async Task Ttl_ALoadBeforeHalfTheTtl_WritesNothing()
     {
         var store = CreateStore(o => o.TimeToLive = TimeSpan.FromSeconds(100));

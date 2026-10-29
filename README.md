@@ -200,7 +200,7 @@ messages to it as a turn (the agent runs below use it for you):
 | Setting | Default | Meaning |
 |---|---|---|
 | `KeyPrefix` | `agent-conversation:` | Prefix of every key, after the component's own key prefix (the app id by default) |
-| `TimeToLive` | none | A conversation expires this long after it was last written; a read after half of it renews it, so a run that pauses keeps its history |
+| `TimeToLive` | none | A conversation expires this long after it was last written. A read after half of it renews it, but a single pause longer than the TTL still loses the history, so size it for the longest pause |
 | `MaxChunkBytes` | 256 KiB | Size of each stored document of messages; keep it below the store's value limit |
 | `TurnDedupeWindow` | 128 | How many recent turn ids are remembered for idempotent appends |
 | `MaxCommitAttempts` | 10 | Commit attempts under contention before `ConversationStoreException` |
@@ -283,11 +283,13 @@ builder.Services.AddDaprAgents()
     earlier turns, **whole and oldest first**, until it fits. A turn starts at a user message, so the
     history sent never opens with an assistant message or a tool result, and a tool call always travels
     with its results. A stored summary counts as a turn.
-  - The instructions, the context providers' messages and **the run's own messages are always sent**:
+  - The instructions, the context providers' messages, system messages in the history other than a
+    stored summary (a persona you pass in, for example) and **the run's own messages are always sent**:
     dropping them would lose the task, its context or the reasoning a tool loop needs. When those alone
-    do not fit, the LLM call fails with `ContextWindowExceededException` instead of reaching a model that
-    would reject the request or silently cut it.
-  - It works with any history, stored or passed in. Tokens are estimated as bytes / 4.
+    do not fit, the LLM call fails, and with it the run, with an error saying the context window was
+    exceeded, instead of reaching a model that would reject the request or silently cut it.
+  - It works with any history, stored or passed in. Tokens are estimated as characters / 4 over the
+    messages as they are sent, so reasoning that is not sent back does not count.
 - **`WithConversationCompaction`** keeps a stored conversation's meaning instead of dropping it:
   - **When it runs:** after a run whose loaded history was past `TriggerTokens`, right after the run's
     turn is stored and before the run returns, so that run's response waits for the summary call.

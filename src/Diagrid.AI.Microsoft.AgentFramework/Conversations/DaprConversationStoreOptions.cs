@@ -57,9 +57,9 @@ public sealed class DaprConversationStoreOptions
     public int MaxCommitAttempts { get; set; } = 10;
 
     /// <summary>
-    /// When set, a conversation expires this long after it was last written: by an append, or by a read once half
-    /// of it has passed, so a run that keeps reading its history (a long pause between LLM calls) does not lose it.
-    /// At least one second.
+    /// When set, a conversation expires this long after it was last written: by an append, or by a read between half
+    /// of it and a margin before it ends. A run that reads its history at least that often keeps it; a single pause
+    /// longer than this between two reads still loses it, so size it for the longest pause. At least one second.
     /// </summary>
     /// <remarks>
     /// Without it, stored conversations are kept until they are deleted, and so are the rare documents left
